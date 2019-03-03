@@ -22,6 +22,7 @@ type Raft struct {
 	sync.Mutex // for locking
 
 	ins         NetworkDevice
+	ss          StateMachine
 	ctx         context.Context
 	instanceNum int
 	mode        WorkMode
@@ -56,7 +57,7 @@ type Raft struct {
 	logInput chan []LogData
 }
 
-func NewRaft(ctx context.Context, instanceNum int, ins NetworkDevice) *Raft {
+func NewRaft(ctx context.Context, instanceNum int, ins NetworkDevice, ss StateMachine) *Raft {
 	if instanceNum <= 0 {
 		log.Fatalf("instanceNum should be larger than 0")
 	}
@@ -67,6 +68,7 @@ func NewRaft(ctx context.Context, instanceNum int, ins NetworkDevice) *Raft {
 
 	raft := &Raft{
 		ins:                      ins,
+		ss:                       ss,
 		ctx:                      ctx,
 		instanceNum:              instanceNum,
 		mode:                     Follower,
@@ -355,6 +357,8 @@ func (r *Raft) candidateTick() {
 
 func (r *Raft) leaderTick() {
 	r.tryCommitLogs()
+	r.tryApplyCommitedLogs()
+	r.tryRemoveRedudentLog()
 
 	now := time.Now()
 	if now.Sub(r.lastAppendEntriesRPCTime) >= leaderAppendEntriesRPCInterval {
@@ -565,5 +569,24 @@ func (r *Raft) tryCommitLogs() {
 			//log.Printf("%s COMMITS %d", r, r.CommitIndex)
 			break
 		}
+	}
+}
+
+func (r *Raft) tryApplyCommitedLogs() {
+	assert.LessOrEqual(r.Logger, r.LastAppliedIndex, r.CommitIndex)
+	for index := r.LastAppliedIndex + 1; index <= r.CommitIndex; index++ {
+		// apply the log
+		log := r.LogList[index-1]
+		assert.Equal(r.Logger, log.Index, index)
+		r.Logger.Infof("%s APPLY %d#%d", r, log.Term, log.Index)
+
+		r.ss.Apply(log.Data)
+		r.LastAppliedIndex = index
+	}
+}
+
+func (r *Raft) tryRemoveRedudentLog() {
+	if len(r.LogList) > 0 && r.LogList[0].Index+1000 < r.LastAppliedIndex {
+		r.LogList = r.LogList[1000:]
 	}
 }

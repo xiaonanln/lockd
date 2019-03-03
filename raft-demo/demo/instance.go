@@ -62,3 +62,7 @@ func (ins *DemoRaftInstance) Broadcast(msg raft.RPCMessage) {
 		other.recvChan <- raft.RecvRPCMessage{ins.ID(), msg}
 	}
 }
+
+func (ins *DemoRaftInstance) Apply(log []byte) {
+
+}
