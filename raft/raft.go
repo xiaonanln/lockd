@@ -5,43 +5,35 @@ package raft
 import (
 	"context"
 	"fmt"
+	"github.com/stretchr/testify/assert"
 	"log"
 	"math/rand"
+	"sync"
 	"time"
 )
 
-type workMode int
-
-func (m workMode) String() string {
-	return [3]string{"follower", "candidate", "leader"}[m]
-}
-
 const (
-	followerMode workMode = iota
-	candidateMode
-	leaderMode
-)
-
-const (
-	electionTimeout                = time.Millisecond * 3000
+	electionTimeout                = time.Millisecond * 100
 	maxStartElectionDelay          = electionTimeout / 2
-	leaderAppendEntriesRPCInterval = time.Millisecond * 50
+	leaderAppendEntriesRPCInterval = time.Millisecond * 10
 )
 
 type Raft struct {
-	ins         RaftInstance
+	sync.Mutex // for locking
+
+	ins         NetworkDevice
 	ctx         context.Context
 	instanceNum int
-	mode        workMode
+	mode        WorkMode
 
 	// raft states
 	currentTerm Term
 	votedFor    int
-	log         []*Log
-	// index of highest log entry known to be committed (initialized to 0, increases monotonically)
-	commitIndex LogIndex
-	// index of highest log entry applied to state machine (initialized to 0, increases monotonically)
-	lastApplied LogIndex
+	LogList     []*Log
+	// Index of highest LogList entry known to be committed (initialized to 0, increases monotonically)
+	CommitIndex LogIndex
+	// Index of highest LogList entry applied to state machine (initialized to 0, increases monotonically)
+	LastAppliedIndex LogIndex
 
 	// all state fields
 	resetElectionTimeoutTime time.Time
@@ -55,13 +47,16 @@ type Raft struct {
 
 	// leader mode fields
 	lastAppendEntriesRPCTime time.Time
-	// for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
+	// for each server, Index of the next LogList entry to send to that server (initialized to leader last LogList Index + 1)
 	nextIndex []LogIndex
-	// for each server, index of highest log entry known to be replicated on server (initialized to 0, increases monotonically)
+	// for each server, Index of highest LogList entry known to be replicated on server (initialized to 0, increases monotonically)
 	matchIndex []LogIndex
+
+	Logger   Logger
+	logInput chan []LogData
 }
 
-func NewRaft(ctx context.Context, instanceNum int, ins RaftInstance) *Raft {
+func NewRaft(ctx context.Context, instanceNum int, ins NetworkDevice) *Raft {
 	if instanceNum <= 0 {
 		log.Fatalf("instanceNum should be larger than 0")
 	}
@@ -74,14 +69,15 @@ func NewRaft(ctx context.Context, instanceNum int, ins RaftInstance) *Raft {
 		ins:                      ins,
 		ctx:                      ctx,
 		instanceNum:              instanceNum,
-		mode:                     followerMode,
+		mode:                     Follower,
 		resetElectionTimeoutTime: time.Now(),
 		// init raft states
-		currentTerm: 0,
-		votedFor:    -1,
-		log:         nil,
-		commitIndex: 0,
-		lastApplied: 0,
+		currentTerm:      0,
+		votedFor:         -1,
+		LogList:          nil,
+		CommitIndex:      0,
+		LastAppliedIndex: 0,
+		Logger:           defaultSugaredLogger,
 	}
 
 	go raft.routine()
@@ -94,7 +90,27 @@ func (r *Raft) ID() int {
 }
 
 func (r *Raft) String() string {
-	return fmt.Sprintf("Raft<%d>", r.ins.ID())
+	return fmt.Sprintf("Raft<%d|%d#%d|C%d|A%d>", r.ins.ID(), r.currentTerm, r.lastLogIndex(), r.CommitIndex, r.LastAppliedIndex)
+}
+
+func (r *Raft) Mode() WorkMode {
+	return r.mode
+}
+
+func (r *Raft) Input(data LogData) (term Term, index LogIndex) {
+	assert.Truef(r.Logger, r.mode == Leader, "not leader")
+
+	term = r.currentTerm
+	index = r.lastLogIndex() + 1
+	newlog := &Log{
+		Term:  term,
+		Index: index,
+		Data:  data,
+	}
+
+	r.LogList = append(r.LogList, newlog)
+	//log.Printf("%s LOG %d#%d DATA=%s", r, r.lastLogTerm(), r.lastLogIndex(), string(newlog.Data))
+	return
 }
 
 func (r *Raft) routine() {
@@ -106,25 +122,28 @@ forloop:
 	for {
 		select {
 		case <-ticker.C:
-			// If commitIndex > lastApplied: increment lastApplied, apply
-			// log[lastApplied] to state machine (§5.3)
+			// If CommitIndex > LastAppliedIndex: increment LastAppliedIndex, apply
+			// LogList[LastAppliedIndex] to state machine (§5.3)
+			r.Lock() // TODO: lock-free mode
 
 			switch r.mode {
-			case leaderMode:
+			case Leader:
 				r.leaderTick()
-			case candidateMode:
+			case Candidate:
 				r.candidateTick()
-			case followerMode:
+			case Follower:
 				r.followerTick()
 			default:
 				log.Fatalf("invalid mode: %d", r.mode)
 			}
 
+			r.Unlock()
+
 		case recvMsg := <-r.ins.Recv():
-			//log.Printf("%s received msg: %+v", r, msg)
+			//LogList.Printf("%s received msg: %+v", r, msg)
+			r.Lock()
 			r.handleMsg(recvMsg.SenderID, recvMsg.Message)
-		case inputLog := <-r.ins.InputLog():
-			r.handleInputLog(inputLog)
+			r.Unlock()
 		case <-r.ctx.Done():
 			log.Printf("%s stopped.", r)
 			break forloop
@@ -134,11 +153,11 @@ forloop:
 
 func (r *Raft) handleMsg(senderID int, _msg RPCMessage) {
 	//All Servers:
-	//?If RPC request or response contains Term T > currentTerm:
+	//?If RPC request or response contains GetTerm T > currentTerm:
 	//set currentTerm = T, convert to follower (?.1)
 
-	if r.currentTerm < _msg.Term() {
-		r.enterFollowerMode(_msg.Term())
+	if r.currentTerm < _msg.GetTerm() {
+		r.enterFollowerMode(_msg.GetTerm())
 	}
 
 	switch msg := _msg.(type) {
@@ -160,20 +179,20 @@ func (r *Raft) handleRequestVote(msg *RequestVoteMessage) {
 	log.Printf("%s grant vote %+v: %v", r, msg, grantVote)
 	// send grant vote ACK
 	// Results:
-	//Term currentTerm, for candidate to update itself
+	//GetTerm currentTerm, for candidate to update itself
 	//voteGranted true means candidate received vote
 	ackMsg := &RequestVoteACKMessage{
-		term:        r.currentTerm,
+		Term:        r.currentTerm,
 		voteGranted: grantVote,
 	}
 	r.ins.Send(msg.candidateId, ackMsg)
 }
 
 func (r *Raft) _handleRequestVote(msg *RequestVoteMessage) bool {
-	//1. Reply false if Term < currentTerm (§5.1)
-	//2. If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote (§5.2, §5.4)
+	//1. Reply false if GetTerm < currentTerm (§5.1)
+	//2. If votedFor is null or candidateId, and candidate’s LogList is at least as up-to-date as receiver’s LogList, grant vote (§5.2, §5.4)
 
-	if msg.term < r.currentTerm {
+	if msg.Term < r.currentTerm {
 		return false
 	}
 
@@ -185,25 +204,27 @@ func (r *Raft) _handleRequestVote(msg *RequestVoteMessage) bool {
 }
 
 func (r *Raft) handleRequestVoteACKMessage(msg *RequestVoteACKMessage) {
-	if r.mode != candidateMode {
+	if r.mode != Candidate || msg.Term != r.currentTerm {
 		// if not in candidate mode anymore, just ignore this packet
 		return
 	}
 
-	r.voteGrantedCount += 1
-	if r.voteGrantedCount >= (r.instanceNum/2)+1 {
-		// become leader
-		r.enterLeaderMode()
+	if msg.voteGranted {
+		r.voteGrantedCount += 1
+		if r.voteGrantedCount >= (r.instanceNum/2)+1 {
+			// become leader
+			r.enterLeaderMode()
+		}
 	}
 }
 
 func (r *Raft) handleAppendEntriesACK(senderID int, msg *AppendEntriesACKMessage) {
-	if r.mode != leaderMode {
+	if r.mode != Leader {
 		// not leader anymore..
 		return
 	}
 
-	// assert msg.term <= r.currentTerm
+	// assert msg.GetTerm <= r.currentTerm
 	if msg.success {
 		r.nextIndex[senderID] = msg.lastLogIndex + 1
 		if msg.lastLogIndex > r.matchIndex[senderID] {
@@ -219,11 +240,10 @@ func (r *Raft) handleAppendEntriesACK(senderID int, msg *AppendEntriesACKMessage
 }
 
 func (r *Raft) handleAppendEntries(msg *AppendEntriesMessage) {
-	r.resetElectionTimeout()
 	success, lastLogIndex := r.handleAppendEntriesImpl(msg)
 
 	r.ins.Send(msg.leaderId, &AppendEntriesACKMessage{
-		term:         r.currentTerm,
+		Term:         r.currentTerm,
 		success:      success,
 		lastLogIndex: lastLogIndex,
 	})
@@ -231,17 +251,18 @@ func (r *Raft) handleAppendEntries(msg *AppendEntriesMessage) {
 }
 
 func (r *Raft) handleAppendEntriesImpl(msg *AppendEntriesMessage) (bool, LogIndex) {
-	//1. Reply false if term < currentTerm (§5.1)
-	// If this is the leader, then msg.term < r.currentTerm should always be satisfied, because Raft assures that msg.term != r.currentTer
-	if msg.term < r.currentTerm {
+	//1. Reply false if GetTerm < currentTerm (§5.1)
+	// If this is the leader, then msg.GetTerm < r.currentTerm should always be satisfied, because Raft assures that msg.GetTerm != r.currentTer
+	if msg.Term < r.currentTerm {
 		return false, 0
 	}
 
-	if r.mode == leaderMode {
+	if r.mode == Leader {
 		log.Fatalf("should not be leader")
 	}
 
-	//2. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm (§5.3)
+	r.resetElectionTimeout()
+	//2. Reply false if LogList doesn’t contain an entry at prevLogIndex whose GetTerm matches prevLogTerm (§5.3)
 	containsPrevLog, prevIdx := r.containsLog(msg.prevLogTerm, msg.prevLogIndex)
 	if !containsPrevLog {
 		return false, 0
@@ -250,53 +271,53 @@ func (r *Raft) handleAppendEntriesImpl(msg *AppendEntriesMessage) (bool, LogInde
 	replaceIdxStart := prevIdx + 1
 
 	for i, entry := range msg.entries {
-		if replaceIdxStart+i < len(r.log) {
-			//3. If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
-			replaceLog := r.log[replaceIdxStart+i]
-			if replaceLog.index != entry.index {
-				log.Fatalf("Log Index Mismatch: %d & %d", replaceLog.index, entry.index)
+		if replaceIdxStart+i < len(r.LogList) {
+			//3. If an existing entry conflicts with a new one (same Index but different terms), delete the existing entry and all that follow it (§5.3)
+			replaceLog := r.LogList[replaceIdxStart+i]
+			if replaceLog.Index != entry.Index {
+				log.Fatalf("LogList Index Mismatch: %d & %d", replaceLog.Index, entry.Index)
 			}
-			if replaceLog.term == entry.term {
+			if replaceLog.Term == entry.Term {
 				// normal case
 			} else {
-				replaceLog.term, replaceLog.data = entry.term, entry.data
-				r.log = r.log[0 : replaceIdxStart+i+1]
+				replaceLog.Term, replaceLog.Data = entry.Term, entry.Data
+				r.LogList = r.LogList[0 : replaceIdxStart+i+1]
 			}
 		} else {
-			//4. Append any new entries not already in the log
-			r.log = append(r.log, entry)
+			//4. Append any new entries not already in the LogList
+			r.LogList = append(r.LogList, entry)
 		}
 	}
 
-	var lastLogTerm Term
+	//var lastLogTerm Term
 	var lastLogIndex LogIndex
 	if len(msg.entries) > 0 {
-		lastLogTerm = msg.entries[len(msg.entries)-1].term
-		lastLogIndex = msg.entries[len(msg.entries)-1].index
+		//lastLogTerm = msg.entries[len(msg.entries)-1].Term
+		lastLogIndex = msg.entries[len(msg.entries)-1].Index
 	} else {
-		lastLogTerm = msg.prevLogTerm
+		//lastLogTerm = msg.prevLogTerm
 		lastLogIndex = msg.prevLogIndex
 	}
-	//5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
-	log.Printf("%s LOG %d.%d", r, lastLogTerm, lastLogIndex)
-	if msg.leaderCommit > r.commitIndex {
+	//5. If leaderCommit > CommitIndex, set CommitIndex = min(leaderCommit, Index of last new entry)
+	//log.Printf("%s LOG %d.%d", r, lastLogTerm, lastLogIndex)
+	if msg.leaderCommit > r.CommitIndex {
 		commitIndex := msg.leaderCommit
 		if commitIndex > lastLogIndex {
 			commitIndex = lastLogIndex
 		}
-		if commitIndex < r.commitIndex {
-			log.Fatalf("New Commit Index Is %d, But Current Commit Index Is %d", commitIndex, r.commitIndex)
+		if commitIndex < r.CommitIndex {
+			log.Fatalf("New Commit Index Is %d, But Current Commit Index Is %d", commitIndex, r.CommitIndex)
 		}
-		if commitIndex > r.commitIndex {
-			r.commitIndex = commitIndex
-			log.Printf("%s COMMITS %d", r, r.commitIndex)
+		if commitIndex > r.CommitIndex {
+			r.CommitIndex = commitIndex
+			//log.Printf("%s COMMITS %d", r, r.CommitIndex)
 		}
 	}
 
 	return true, lastLogIndex
 }
 
-// isLogUpToDate determines if the log of specified Term and index is at least as up-to-date as r.log
+// isLogUpToDate determines if the LogList of specified GetTerm and Index is at least as up-to-date as r.LogList
 func (r *Raft) isLogUpToDate(term Term, logIndex LogIndex) bool {
 	myterm := r.lastLogTerm()
 	if term < myterm {
@@ -338,7 +359,7 @@ func (r *Raft) leaderTick() {
 	now := time.Now()
 	if now.Sub(r.lastAppendEntriesRPCTime) >= leaderAppendEntriesRPCInterval {
 		// time to broadcast AppendEntriesRPC
-		//log.Printf("%s: Broadcast AppendEntries ...", r)
+		//LogList.Printf("%s: Broadcast AppendEntries ...", r)
 		r.lastAppendEntriesRPCTime = now
 		r.broadcastAppendEntries()
 	}
@@ -349,7 +370,7 @@ func (r *Raft) resetElectionTimeout() {
 }
 
 func (r *Raft) prepareElection() {
-	r.assureInMode(candidateMode)
+	r.assureInMode(Candidate)
 
 	log.Printf("%s prepare election ...", r)
 	r.startElectionTime = time.Now().Add(time.Duration(rand.Int63n(int64(maxStartElectionDelay))))
@@ -359,7 +380,7 @@ func (r *Raft) prepareElection() {
 }
 
 func (r *Raft) startElection() {
-	r.assureInMode(candidateMode)
+	r.assureInMode(Candidate)
 
 	if r.electionStarted {
 		log.Panicf("election already started")
@@ -379,12 +400,12 @@ func (r *Raft) startElection() {
 
 func (r *Raft) sendRequestVote() {
 	//Arguments:
-	//Term candidate’s Term
+	//GetTerm candidate’s GetTerm
 	//candidateId candidate requesting vote
-	//lastLogIndex index of candidate’s last log entry (§5.4)
-	//lastLogTerm Term of candidate’s last log entry (§5.4)
+	//lastLogIndex Index of candidate’s last LogList entry (§5.4)
+	//lastLogTerm GetTerm of candidate’s last LogList entry (§5.4)
 	msg := &RequestVoteMessage{
-		term:         r.currentTerm,
+		Term:         r.currentTerm,
 		candidateId:  r.ID(),
 		lastLogIndex: r.lastLogIndex(),
 		lastLogTerm:  r.lastLogTerm(),
@@ -392,45 +413,46 @@ func (r *Raft) sendRequestVote() {
 	r.ins.Broadcast(msg)
 }
 
-func (r *Raft) assureInMode(mode workMode) {
+func (r *Raft) assureInMode(mode WorkMode) {
 	if r.mode != mode {
 		log.Fatalf("%s should in %s mode, but in %s mode", r, mode, r.mode)
 	}
 }
 
-// enter follower mode with new Term
+// enter follower mode with new GetTerm
 func (r *Raft) enterFollowerMode(term Term) {
-	log.Printf("%s change mode: %s ==> %s, new Term = %d", r, r.mode, followerMode, term)
+	log.Printf("%s change mode: %s ==> %s, new GetTerm = %d", r, r.mode, Follower, term)
 	r.newTerm(term)
-	r.mode = followerMode
+	r.mode = Follower
 }
 
 func (r *Raft) newTerm(term Term) {
 	if r.currentTerm >= term {
-		log.Fatalf("current Term is %d, can not enter follower mode with Term %d", r.currentTerm, term)
+		log.Fatalf("current GetTerm is %d, can not enter follower mode with GetTerm %d", r.currentTerm, term)
 	}
 	r.currentTerm = term
 	r.votedFor = -1
+	r.voteGrantedCount = 0
 }
 
 func (r *Raft) enterCandidateMode() {
-	if r.mode != followerMode {
+	if r.mode != Follower {
 		log.Fatalf("only follower can convert to candidate, but current mode is %s", r.mode)
 	}
 
-	log.Printf("%s change mode: %s ==> %s", r, r.mode, candidateMode)
-	r.mode = candidateMode
+	log.Printf("%s change mode: %s ==> %s", r, r.mode, Candidate)
+	r.mode = Candidate
 	r.prepareElection()
 }
 
 func (r *Raft) enterLeaderMode() {
-	if r.mode != candidateMode {
+	if r.mode != Candidate {
 		log.Fatalf("only candidate can convert to leader, but current mode is %s", r.mode)
 	}
 
-	log.Printf("%s change mode: %s ==> %s", r, r.mode, leaderMode)
-	r.mode = leaderMode
-	log.Printf("NEW LEADER ELECTED: %d !!!", r.ID())
+	log.Printf("%s change mode: %s ==> %s", r, r.mode, Leader)
+	r.mode = Leader
+	log.Printf("NEW LEADER ELECTED: %d, term=%v, granted=%d, quorum=%d !!!", r.ID(), r.currentTerm, r.voteGrantedCount, r.instanceNum)
 	r.lastAppendEntriesRPCTime = time.Time{}
 	r.nextIndex = make([]LogIndex, r.instanceNum)
 	for i := range r.nextIndex {
@@ -440,16 +462,16 @@ func (r *Raft) enterLeaderMode() {
 }
 
 func (r *Raft) lastLogIndex() LogIndex {
-	if len(r.log) > 0 {
-		return r.log[len(r.log)-1].index
+	if len(r.LogList) > 0 {
+		return r.LogList[len(r.LogList)-1].Index
 	} else {
 		return 0
 	}
 }
 
 func (r *Raft) lastLogTerm() Term {
-	if len(r.log) > 0 {
-		return r.log[len(r.log)-1].term
+	if len(r.LogList) > 0 {
+		return r.LogList[len(r.LogList)-1].Term
 	} else {
 		return 0
 	}
@@ -460,51 +482,35 @@ func (r *Raft) broadcastAppendEntries() {
 			continue
 		}
 
-		logIndex := r.nextIndex[insID] // next index for the instance to receive
+		logIndex := r.nextIndex[insID] // next Index for the instance to receive
 		var entries []*Log
 		nextlogidx := r.locateLog(logIndex)
 		var prevLogTerm Term
 		var prevLogIndex LogIndex
 		if nextlogidx > 0 {
-			prevLogTerm = r.log[nextlogidx-1].term
-			prevLogIndex = r.log[nextlogidx-1].index
+			prevLogTerm = r.LogList[nextlogidx-1].Term
+			prevLogIndex = r.LogList[nextlogidx-1].Index
 		}
 
-		for i := nextlogidx; i < len(r.log); i++ {
-			entries = append(entries, r.log[i])
+		for i := nextlogidx; i < len(r.LogList); i++ {
+			entries = append(entries, r.LogList[i])
 		}
 
-		if len(entries) > 0 {
-			log.Printf("%s APPEND %d LOG %d ~ %d", r, insID, nextlogidx, len(r.log)-1)
-		}
+		//if len(entries) > 0 {
+		//	log.Printf("%s APPEND %d LOG %d ~ %d", r, insID, nextlogidx, len(r.LogList)-1)
+		//}
 
 		msg := &AppendEntriesMessage{
-			term:         r.currentTerm,
+			Term:         r.currentTerm,
 			leaderId:     r.ID(),
 			prevLogTerm:  prevLogTerm,
 			prevLogIndex: prevLogIndex,
-			leaderCommit: r.commitIndex,
+			leaderCommit: r.CommitIndex,
 			entries:      entries,
 		}
 
 		r.ins.Send(insID, msg)
 	}
-}
-
-func (r *Raft) handleInputLog(data LogData) {
-	if r.mode != leaderMode {
-		//log.Printf("Not Leader, Data Ignored: %s", data)
-		return
-	}
-
-	newlog := &Log{
-		term:  r.currentTerm,
-		index: r.lastLogIndex() + 1,
-		data:  data,
-	}
-
-	r.log = append(r.log, newlog)
-	log.Printf("%s LOG %d.%d %s", r, r.lastLogTerm(), r.lastLogIndex(), string(newlog.data))
 }
 
 func (r *Raft) locateLog(index LogIndex) int {
@@ -516,47 +522,47 @@ func (r *Raft) containsLog(term Term, index LogIndex) (bool, int) {
 	idx := r.locateLog(index)
 	if idx == -1 {
 		return true, -1
-	} else if idx >= len(r.log) {
+	} else if idx >= len(r.LogList) {
 		return false, idx
 	}
 
-	_log := r.log[idx]
-	if _log.index != index {
+	_log := r.LogList[idx]
+	if _log.Index != index {
 		log.Fatalf("Should Equal")
 	}
-	return _log.term == term, idx
+	return _log.Term == term, idx
 }
 
 func (r *Raft) validateLog() {
 	prevLogIndex := LogIndex(0)
-	for _, _log := range r.log {
-		if _log.index != prevLogIndex+1 {
-			log.Fatalf("Invalid Log Index: %d, Should be %d", _log.index, prevLogIndex+1)
+	for _, _log := range r.LogList {
+		if _log.Index != prevLogIndex+1 {
+			log.Fatalf("Invalid LogList Index: %d, Should be %d", _log.Index, prevLogIndex+1)
 		}
-		prevLogIndex = _log.index
+		prevLogIndex = _log.Index
 	}
 }
 func (r *Raft) tryCommitLogs() {
-	//If there exists an N such that N > commitIndex, a majority
-	//of matchIndex[i] ≥ N, and log[N].term == currentTerm:
-	//set commitIndex = N (§5.3, §5.4).
-	for idx := len(r.log) - 1; idx >= 0; idx-- {
-		_log := r.log[idx]
-		if _log.index <= r.commitIndex || _log.term != r.currentTerm {
+	//If there exists an N such that N > CommitIndex, a majority
+	//of matchIndex[i] ≥ N, and LogList[N].GetTerm == currentTerm:
+	//set CommitIndex = N (§5.3, §5.4).
+	for idx := len(r.LogList) - 1; idx >= 0; idx-- {
+		_log := r.LogList[idx]
+		if _log.Index <= r.CommitIndex || _log.Term != r.currentTerm {
 			// nothing to commit
 			break
 		}
-		// _log.index > r.commitIndex && _log.term == r.currentTerm, check if we can commit this _log
+		// _log.Index > r.CommitIndex && _log.GetTerm == r.currentTerm, check if we can commit this _log
 		commitCount := 1
 		for id, matchIndx := range r.matchIndex {
-			if id != r.ID() && matchIndx >= _log.index {
+			if id != r.ID() && matchIndx >= _log.Index {
 				commitCount += 1
 			}
 		}
 		if commitCount >= r.instanceNum/2+1 {
 			// commited
-			r.commitIndex = _log.index
-			log.Printf("%s COMMITS %d", r, r.commitIndex)
+			r.CommitIndex = _log.Index
+			//log.Printf("%s COMMITS %d", r, r.CommitIndex)
 			break
 		}
 	}
