@@ -85,8 +85,8 @@ func verifyCorrectness(instances []*demo.DemoRaftInstance) {
 	// 监查每个Raft实例，确定所有Commit部分都完全相同。
 	for i := 0; i < INSTANCE_NUM; i++ {
 		r := raftInstances[i].Raft
-		if len(r.LogList) > 0 {
-			assert.Equal(r.Logger, raft.LogIndex(1), r.LogList[0].Index)
+		if len(r.LogList.Logs) > 0 {
+			assert.Equal(r.Logger, raft.LogIndex(1), r.LogList.Logs[0].Index)
 		}
 	}
 
@@ -103,16 +103,16 @@ func verifyCorrectness(instances []*demo.DemoRaftInstance) {
 
 	// make sure all commited logs are exactly same
 	for index := raft.LogIndex(1); index <= leaderCommitIndex; index++ {
-		assert.Equal(leader.Logger, index, leader.LogList[index-1].Index)
-		logTerm := leader.LogList[index-1].Term
-		logData := leader.LogList[index-1].Data
+		assert.Equal(leader.Logger, index, leader.LogList.Logs[index-1].Index)
+		logTerm := leader.LogList.Logs[index-1].Term
+		logData := leader.LogList.Logs[index-1].Data
 
 		for i := 0; i < INSTANCE_NUM; i++ {
 			r := raftInstances[i].Raft
 			if r != leader && index <= r.CommitIndex {
-				assert.Equal(r.Logger, index, r.LogList[index-1].Index)
-				assert.Equal(r.Logger, logTerm, r.LogList[index-1].Term)
-				assert.Equal(r.Logger, logData, r.LogList[index-1].Data)
+				assert.Equal(r.Logger, index, r.LogList.Logs[index-1].Index)
+				assert.Equal(r.Logger, logTerm, r.LogList.Logs[index-1].Term)
+				assert.Equal(r.Logger, logData, r.LogList.Logs[index-1].Data)
 			}
 		}
 	}

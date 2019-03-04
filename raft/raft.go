@@ -18,6 +18,127 @@ const (
 	leaderAppendEntriesRPCInterval = time.Millisecond * 10
 )
 
+type LogList struct {
+	PrevLogTerm  Term
+	PrevLogIndex LogIndex
+	Logs         []*Log
+}
+
+func (ll *LogList) LastLogTerm() Term {
+	if len(ll.Logs) > 0 {
+		return ll.Logs[len(ll.Logs)-1].Term
+	} else {
+		return ll.PrevLogTerm
+	}
+}
+
+func (ll *LogList) LastLogIndex() LogIndex {
+	if len(ll.Logs) > 0 {
+		return ll.Logs[len(ll.Logs)-1].Index
+	} else {
+		return ll.PrevLogIndex
+	}
+}
+
+func (ll *LogList) FindLogBefore(logIndex LogIndex) (prevTerm Term, prevLogIndex LogIndex) {
+	idx := ll.LogIndexToIndex(logIndex)
+	if idx > 0 {
+		prevLog := ll.Logs[idx-1]
+		prevTerm, prevLogIndex = prevLog.Term, prevLog.Index
+	} else if idx == 0 {
+		// this is the first log, so the previous one is already applied
+		prevTerm, prevLogIndex = ll.PrevLogTerm, ll.PrevLogIndex
+	} else {
+		// idx < 0 ? can not handle this case now, todo: handle this case
+		assert.Failf(defaultSugaredLogger, "FindLogBefore", "can not find prev term & index for log index %v", logIndex)
+	}
+	return
+}
+
+func (ll *LogList) GetEntries(startLogIndex LogIndex) []*Log {
+	startIdx := ll.LogIndexToIndex(startLogIndex)
+	return ll.Logs[startIdx:]
+}
+
+func (ll *LogList) Append(data []byte, term Term) *Log {
+	index := ll.LastLogIndex() + 1
+	newlog := &Log{
+		Term:  term,
+		Index: index,
+		Data:  data,
+	}
+
+	ll.Logs = append(ll.Logs, newlog)
+	return newlog
+}
+
+func (ll *LogList) AppendEntries(prevTerm Term, prevIndex LogIndex, entries []*Log) bool {
+	foundPrevLog, prevIdx := ll.LocateLog(prevTerm, prevIndex)
+	if !foundPrevLog {
+		return false
+	}
+
+	replaceIdx := prevIdx + 1
+	readIdx := 0
+	if replaceIdx < 0 {
+		// previous log is applied already, so we advance read index by the number of logs in entries that are already applied
+		readIdx += (-replaceIdx)
+	}
+
+	for ; readIdx < len(entries); readIdx++ {
+		entry := entries[readIdx]
+
+		if replaceIdx < len(ll.Logs) {
+			//3. If an existing entry conflicts with a new one (same Index but different terms), delete the existing entry and all that follow it (§5.3)
+			replaceLog := ll.Logs[replaceIdx]
+			assert.Equal(defaultSugaredLogger, entry.Index, replaceLog.Index)
+
+			if replaceLog.Term == entry.Term {
+				// normal case
+			} else {
+				replaceLog.Term, replaceLog.Data = entry.Term, entry.Data
+				ll.Logs = ll.Logs[0 : replaceIdx+1]
+			}
+		} else {
+			//4. Append any new entries not already in the LogList
+			ll.Logs = append(ll.Logs, entry)
+		}
+
+		replaceIdx += 1
+
+	}
+	return true
+}
+
+// LocateLog find the index for the log index
+func (ll *LogList) LogIndexToIndex(index LogIndex) int {
+	if index >= ll.PrevLogIndex {
+		return int(index-ll.PrevLogIndex) - 1
+	} else {
+		return -int(ll.PrevLogIndex-index) - 1
+	}
+}
+
+func (ll *LogList) LocateLog(term Term, index LogIndex) (bool, int) {
+	idx := ll.LogIndexToIndex(index)
+	if idx < 0 {
+		// the log is already applied, term must match because all applied logs are committed
+		return true, idx
+	}
+
+	if idx >= len(ll.Logs) {
+		return false, -1
+	}
+
+	log := ll.Logs[idx]
+	assert.Equal(defaultSugaredLogger, log.Index, index)
+	if log.Term != term {
+		return false, -1 // log found with different term
+	}
+
+	return true, idx
+}
+
 type Raft struct {
 	sync.Mutex // for locking
 
@@ -30,7 +151,7 @@ type Raft struct {
 	// raft states
 	currentTerm Term
 	votedFor    int
-	LogList     []*Log
+	LogList     LogList
 	// Index of highest LogList entry known to be committed (initialized to 0, increases monotonically)
 	CommitIndex LogIndex
 	// Index of highest LogList entry applied to state machine (initialized to 0, increases monotonically)
@@ -74,9 +195,12 @@ func NewRaft(ctx context.Context, instanceNum int, ins NetworkDevice, ss StateMa
 		mode:                     Follower,
 		resetElectionTimeoutTime: time.Now(),
 		// init raft states
-		currentTerm:      0,
-		votedFor:         -1,
-		LogList:          nil,
+		currentTerm: 0,
+		votedFor:    -1,
+		LogList: LogList{
+			PrevLogTerm:  0,
+			PrevLogIndex: 0,
+		},
 		CommitIndex:      0,
 		LastAppliedIndex: 0,
 		Logger:           defaultSugaredLogger,
@@ -92,7 +216,7 @@ func (r *Raft) ID() int {
 }
 
 func (r *Raft) String() string {
-	return fmt.Sprintf("Raft<%d|%d#%d|C%d|A%d>", r.ins.ID(), r.currentTerm, r.lastLogIndex(), r.CommitIndex, r.LastAppliedIndex)
+	return fmt.Sprintf("Raft<%d|%d#%d|C%d|A%d>", r.ins.ID(), r.currentTerm, r.LogList.LastLogIndex(), r.CommitIndex, r.LastAppliedIndex)
 }
 
 func (r *Raft) Mode() WorkMode {
@@ -101,17 +225,9 @@ func (r *Raft) Mode() WorkMode {
 
 func (r *Raft) Input(data LogData) (term Term, index LogIndex) {
 	assert.Truef(r.Logger, r.mode == Leader, "not leader")
-
 	term = r.currentTerm
-	index = r.lastLogIndex() + 1
-	newlog := &Log{
-		Term:  term,
-		Index: index,
-		Data:  data,
-	}
-
-	r.LogList = append(r.LogList, newlog)
-	//log.Printf("%s LOG %d#%d DATA=%s", r, r.lastLogTerm(), r.lastLogIndex(), string(newlog.Data))
+	newlog := r.LogList.Append(data, term)
+	index = newlog.Index
 	return
 }
 
@@ -226,6 +342,7 @@ func (r *Raft) handleAppendEntriesACK(senderID int, msg *AppendEntriesACKMessage
 		return
 	}
 
+	r.Logger.Infof("%s.handleAppendEntriesACK: %v success=%v", r, senderID, msg.success)
 	// assert msg.GetTerm <= r.currentTerm
 	if msg.success {
 		r.nextIndex[senderID] = msg.lastLogIndex + 1
@@ -265,30 +382,11 @@ func (r *Raft) handleAppendEntriesImpl(msg *AppendEntriesMessage) (bool, LogInde
 
 	r.resetElectionTimeout()
 	//2. Reply false if LogList doesn’t contain an entry at prevLogIndex whose GetTerm matches prevLogTerm (§5.3)
-	containsPrevLog, prevIdx := r.containsLog(msg.prevLogTerm, msg.prevLogIndex)
-	if !containsPrevLog {
+	r.Logger.Infof("%s.AppendEntries: %+v", r, msg)
+	appendOk := r.LogList.AppendEntries(msg.prevLogTerm, msg.prevLogIndex, msg.entries)
+	r.Logger.Infof("%s.handleAppendEntriesImpl: Ok=%v", r, appendOk)
+	if !appendOk {
 		return false, 0
-	}
-
-	replaceIdxStart := prevIdx + 1
-
-	for i, entry := range msg.entries {
-		if replaceIdxStart+i < len(r.LogList) {
-			//3. If an existing entry conflicts with a new one (same Index but different terms), delete the existing entry and all that follow it (§5.3)
-			replaceLog := r.LogList[replaceIdxStart+i]
-			if replaceLog.Index != entry.Index {
-				log.Fatalf("LogList Index Mismatch: %d & %d", replaceLog.Index, entry.Index)
-			}
-			if replaceLog.Term == entry.Term {
-				// normal case
-			} else {
-				replaceLog.Term, replaceLog.Data = entry.Term, entry.Data
-				r.LogList = r.LogList[0 : replaceIdxStart+i+1]
-			}
-		} else {
-			//4. Append any new entries not already in the LogList
-			r.LogList = append(r.LogList, entry)
-		}
 	}
 
 	//var lastLogTerm Term
@@ -321,14 +419,14 @@ func (r *Raft) handleAppendEntriesImpl(msg *AppendEntriesMessage) (bool, LogInde
 
 // isLogUpToDate determines if the LogList of specified GetTerm and Index is at least as up-to-date as r.LogList
 func (r *Raft) isLogUpToDate(term Term, logIndex LogIndex) bool {
-	myterm := r.lastLogTerm()
+	myterm := r.LogList.LastLogTerm()
 	if term < myterm {
 		return false
 	} else if term > myterm {
 		return true
 	}
 
-	return logIndex >= r.lastLogIndex()
+	return logIndex >= r.LogList.LastLogIndex()
 }
 
 func (r *Raft) followerTick() {
@@ -411,8 +509,8 @@ func (r *Raft) sendRequestVote() {
 	msg := &RequestVoteMessage{
 		Term:         r.currentTerm,
 		candidateId:  r.ID(),
-		lastLogIndex: r.lastLogIndex(),
-		lastLogTerm:  r.lastLogTerm(),
+		lastLogIndex: r.LogList.LastLogIndex(),
+		lastLogTerm:  r.LogList.LastLogTerm(),
 	}
 	r.ins.Broadcast(msg)
 }
@@ -460,49 +558,25 @@ func (r *Raft) enterLeaderMode() {
 	r.lastAppendEntriesRPCTime = time.Time{}
 	r.nextIndex = make([]LogIndex, r.instanceNum)
 	for i := range r.nextIndex {
-		r.nextIndex[i] = r.lastLogIndex() + 1
+		r.nextIndex[i] = r.LogList.LastLogIndex() + 1
 	}
 	r.matchIndex = make([]LogIndex, r.instanceNum)
 }
 
-func (r *Raft) lastLogIndex() LogIndex {
-	if len(r.LogList) > 0 {
-		return r.LogList[len(r.LogList)-1].Index
-	} else {
-		return 0
-	}
-}
-
-func (r *Raft) lastLogTerm() Term {
-	if len(r.LogList) > 0 {
-		return r.LogList[len(r.LogList)-1].Term
-	} else {
-		return 0
-	}
-}
 func (r *Raft) broadcastAppendEntries() {
+	// TODO: use broadcast if all followers have same `nextIndex`
 	for insID := 0; insID < r.instanceNum; insID++ {
 		if insID == r.ID() {
 			continue
 		}
 
-		logIndex := r.nextIndex[insID] // next Index for the instance to receive
-		var entries []*Log
-		nextlogidx := r.locateLog(logIndex)
-		var prevLogTerm Term
-		var prevLogIndex LogIndex
-		if nextlogidx > 0 {
-			prevLogTerm = r.LogList[nextlogidx-1].Term
-			prevLogIndex = r.LogList[nextlogidx-1].Index
-		}
+		nextLogIndex := r.nextIndex[insID] // next Index for the instance to receive
+		prevLogTerm, prevLogIndex := r.LogList.FindLogBefore(nextLogIndex)
+		entries := r.LogList.GetEntries(nextLogIndex)
 
-		for i := nextlogidx; i < len(r.LogList); i++ {
-			entries = append(entries, r.LogList[i])
+		if len(entries) > 0 {
+			log.Printf("%s APPEND %d LOG %d ~ %d", r, insID, entries[0].Index, entries[len(entries)-1].Index)
 		}
-
-		//if len(entries) > 0 {
-		//	log.Printf("%s APPEND %d LOG %d ~ %d", r, insID, nextlogidx, len(r.LogList)-1)
-		//}
 
 		msg := &AppendEntriesMessage{
 			Term:         r.currentTerm,
@@ -517,41 +591,12 @@ func (r *Raft) broadcastAppendEntries() {
 	}
 }
 
-func (r *Raft) locateLog(index LogIndex) int {
-	r.validateLog()
-	return int(index) - 1
-}
-
-func (r *Raft) containsLog(term Term, index LogIndex) (bool, int) {
-	idx := r.locateLog(index)
-	if idx == -1 {
-		return true, -1
-	} else if idx >= len(r.LogList) {
-		return false, idx
-	}
-
-	_log := r.LogList[idx]
-	if _log.Index != index {
-		log.Fatalf("Should Equal")
-	}
-	return _log.Term == term, idx
-}
-
-func (r *Raft) validateLog() {
-	prevLogIndex := LogIndex(0)
-	for _, _log := range r.LogList {
-		if _log.Index != prevLogIndex+1 {
-			log.Fatalf("Invalid LogList Index: %d, Should be %d", _log.Index, prevLogIndex+1)
-		}
-		prevLogIndex = _log.Index
-	}
-}
 func (r *Raft) tryCommitLogs() {
 	//If there exists an N such that N > CommitIndex, a majority
 	//of matchIndex[i] ≥ N, and LogList[N].GetTerm == currentTerm:
 	//set CommitIndex = N (§5.3, §5.4).
-	for idx := len(r.LogList) - 1; idx >= 0; idx-- {
-		_log := r.LogList[idx]
+	for idx := len(r.LogList.Logs) - 1; idx >= 0; idx-- {
+		_log := r.LogList.Logs[idx]
 		if _log.Index <= r.CommitIndex || _log.Term != r.currentTerm {
 			// nothing to commit
 			break
@@ -573,10 +618,10 @@ func (r *Raft) tryCommitLogs() {
 }
 
 func (r *Raft) tryApplyCommitedLogs() {
-	assert.LessOrEqual(r.Logger, r.LastAppliedIndex, r.CommitIndex)
+	assert.LessOrEqual(r.Logger, uint64(r.LastAppliedIndex), uint64(r.CommitIndex))
 	for index := r.LastAppliedIndex + 1; index <= r.CommitIndex; index++ {
 		// apply the log
-		log := r.LogList[index-1]
+		log := r.LogList.Logs[index-1]
 		assert.Equal(r.Logger, log.Index, index)
 		r.Logger.Infof("%s APPLY %d#%d", r, log.Term, log.Index)
 
@@ -586,7 +631,7 @@ func (r *Raft) tryApplyCommitedLogs() {
 }
 
 func (r *Raft) tryRemoveRedudentLog() {
-	if len(r.LogList) > 0 && r.LogList[0].Index+1000 < r.LastAppliedIndex {
-		r.LogList = r.LogList[1000:]
+	if len(r.LogList.Logs) > 0 && r.LogList.Logs[0].Index+1000 < r.LastAppliedIndex {
+		r.LogList.Logs = r.LogList.Logs[1000:]
 	}
 }
