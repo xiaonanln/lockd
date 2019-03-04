@@ -71,6 +71,7 @@ func verifyCorrectness(instances []*demo.DemoRaftInstance) {
 	followers := []*raft.Raft{}
 	for i := 0; i < INSTANCE_NUM; i++ {
 		r := raftInstances[i].Raft
+		r.VerifyCorrectness()
 		if r != leader {
 			followers = append(followers, r)
 		}
@@ -83,41 +84,51 @@ func verifyCorrectness(instances []*demo.DemoRaftInstance) {
 	}
 
 	// 监查每个Raft实例，确定所有Commit部分都完全相同。
-	for i := 0; i < INSTANCE_NUM; i++ {
-		r := raftInstances[i].Raft
-		if len(r.LogList.Logs) > 0 {
-			assert.Equal(r.Logger, raft.LogIndex(1), r.LogList.Logs[0].Index)
-		}
-	}
-
 	if leader == nil {
 		return
 	}
 
 	leaderCommitIndex := leader.CommitIndex
-	// other raft instances should not have larger commit index
+	isAllAppliedLogIndexSame := true    // determine if all rafts has same LastAppliedIndex
+	minLogIndex := raft.InvalidLogIndex // to find the first log logIndex that <= leader.CommitIndex and exists on all raft instances
+	// other raft instances should not have larger commit logIndex
 	for i := 0; i < INSTANCE_NUM; i++ {
 		r := raftInstances[i].Raft
 		assert.LessOrEqual(r.Logger, r.CommitIndex, leaderCommitIndex)
+		if minLogIndex < r.LogList.PrevLogIndex+1 {
+			minLogIndex = r.LogList.PrevLogIndex + 1
+		}
+		if r.LastAppliedIndex != leader.LastAppliedIndex {
+			isAllAppliedLogIndexSame = false
+		}
 	}
 
 	// make sure all commited logs are exactly same
-	for index := raft.LogIndex(1); index <= leaderCommitIndex; index++ {
-		assert.Equal(leader.Logger, index, leader.LogList.Logs[index-1].Index)
-		logTerm := leader.LogList.Logs[index-1].Term
-		logData := leader.LogList.Logs[index-1].Data
+	for logIndex := minLogIndex; logIndex <= leaderCommitIndex; logIndex++ {
+		leaderLog := leader.LogList.GetLog(logIndex)
+		assert.Equal(leader.Logger, logIndex, leaderLog.Index)
+		logTerm := leaderLog.Term
+		logData := leaderLog.Data
 
 		for i := 0; i < INSTANCE_NUM; i++ {
 			r := raftInstances[i].Raft
-			if r != leader && index <= r.CommitIndex {
-				assert.Equal(r.Logger, index, r.LogList.Logs[index-1].Index)
-				assert.Equal(r.Logger, logTerm, r.LogList.Logs[index-1].Term)
-				assert.Equal(r.Logger, logData, r.LogList.Logs[index-1].Data)
+			if r != leader && logIndex <= r.CommitIndex {
+				followerLog := r.LogList.GetLog(logIndex)
+				assert.Equal(r.Logger, logIndex, followerLog.Index)
+				assert.Equal(r.Logger, logTerm, followerLog.Term)
+				assert.Equal(r.Logger, logData, followerLog.Data)
 			}
 		}
 	}
 
-	log.Printf("Verify correctness ok: leader's commit index = %v", leaderCommitIndex)
+	// make sure all state machines are consistent
+	if isAllAppliedLogIndexSame {
+		for i := 0; i < INSTANCE_NUM-1; i++ {
+			assert.True(leader.Logger, instances[i].StateMachineEquals(instances[i+1]))
+		}
+	}
+
+	log.Printf("Verify correctness ok: leader's commit logIndex = %v, check entries range: %v ~ %v", leaderCommitIndex, minLogIndex, leaderCommitIndex)
 }
 
 func findLeader() *raft.Raft {

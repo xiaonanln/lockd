@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/xiaonanln/lockd/raft"
+	"strconv"
 	"sync"
 )
 
@@ -12,6 +13,8 @@ type DemoRaftInstance struct {
 	id       int
 	recvChan chan raft.RecvRPCMessage
 	Raft     *raft.Raft
+
+	sumAllNumbers int
 }
 
 var (
@@ -63,6 +66,15 @@ func (ins *DemoRaftInstance) Broadcast(msg raft.RPCMessage) {
 	}
 }
 
-func (ins *DemoRaftInstance) Apply(log []byte) {
+func (ins *DemoRaftInstance) ApplyLog(data []byte) {
+	n, err := strconv.Atoi(string(data))
+	if err != nil {
+		panic(err)
+	}
 
+	ins.sumAllNumbers += n
+}
+
+func (ins *DemoRaftInstance) StateMachineEquals(other *DemoRaftInstance) bool {
+	return ins.sumAllNumbers == other.sumAllNumbers
 }

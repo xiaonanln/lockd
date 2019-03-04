@@ -43,6 +43,7 @@ func (ll *LogList) LastLogIndex() LogIndex {
 func (ll *LogList) FindLogBefore(logIndex LogIndex) (prevTerm Term, prevLogIndex LogIndex) {
 	idx := ll.LogIndexToIndex(logIndex)
 	if idx > 0 {
+		//defaultSugaredLogger.Infof("idx=%v, ll.Logs=%v", idx, len(ll.Logs))
 		prevLog := ll.Logs[idx-1]
 		prevTerm, prevLogIndex = prevLog.Term, prevLog.Index
 	} else if idx == 0 {
@@ -139,6 +140,20 @@ func (ll *LogList) LocateLog(term Term, index LogIndex) (bool, int) {
 	return true, idx
 }
 
+func (ll *LogList) RemoveApplied(num int) {
+	removedEntries := ll.Logs[:num]
+	ll.Logs = ll.Logs[num:]
+	lastRemovedLog := removedEntries[len(removedEntries)-1]
+	ll.PrevLogTerm = lastRemovedLog.Term
+	ll.PrevLogIndex = lastRemovedLog.Index
+}
+
+func (ll *LogList) GetLog(logIndex LogIndex) *Log {
+	idx := ll.LogIndexToIndex(logIndex)
+	//defaultSugaredLogger.Infof("try go get log index=%v, idx=%v, but logs = %v", logIndex, idx, ll.Logs)
+	return ll.Logs[idx]
+}
+
 type Raft struct {
 	sync.Mutex // for locking
 
@@ -216,7 +231,7 @@ func (r *Raft) ID() int {
 }
 
 func (r *Raft) String() string {
-	return fmt.Sprintf("Raft<%d|%d#%d|C%d|A%d>", r.ins.ID(), r.currentTerm, r.LogList.LastLogIndex(), r.CommitIndex, r.LastAppliedIndex)
+	return fmt.Sprintf("Raft<%d|%v|%d#%d|C%d|A%d>", r.ins.ID(), r.mode, r.currentTerm, r.LogList.LastLogIndex(), r.CommitIndex, r.LastAppliedIndex)
 }
 
 func (r *Raft) Mode() WorkMode {
@@ -342,7 +357,7 @@ func (r *Raft) handleAppendEntriesACK(senderID int, msg *AppendEntriesACKMessage
 		return
 	}
 
-	r.Logger.Infof("%s.handleAppendEntriesACK: %v success=%v", r, senderID, msg.success)
+	//r.Logger.Infof("%s.handleAppendEntriesACK: %v success=%v", r, senderID, msg.success)
 	// assert msg.GetTerm <= r.currentTerm
 	if msg.success {
 		r.nextIndex[senderID] = msg.lastLogIndex + 1
@@ -382,9 +397,9 @@ func (r *Raft) handleAppendEntriesImpl(msg *AppendEntriesMessage) (bool, LogInde
 
 	r.resetElectionTimeout()
 	//2. Reply false if LogList doesn’t contain an entry at prevLogIndex whose GetTerm matches prevLogTerm (§5.3)
-	r.Logger.Infof("%s.AppendEntries: %+v", r, msg)
+	//r.Logger.Infof("%s.AppendEntries: %+v", r, msg)
 	appendOk := r.LogList.AppendEntries(msg.prevLogTerm, msg.prevLogIndex, msg.entries)
-	r.Logger.Infof("%s.handleAppendEntriesImpl: Ok=%v", r, appendOk)
+	//r.Logger.Infof("%s.handleAppendEntriesImpl: Ok=%v", r, appendOk)
 	if !appendOk {
 		return false, 0
 	}
@@ -430,6 +445,9 @@ func (r *Raft) isLogUpToDate(term Term, logIndex LogIndex) bool {
 }
 
 func (r *Raft) followerTick() {
+	r.tryApplyCommitedLogs()
+	r.tryRemoveRedudentLog()
+
 	now := time.Now()
 	if now.Sub(r.resetElectionTimeoutTime) > electionTimeout {
 		r.enterCandidateMode()
@@ -437,6 +455,9 @@ func (r *Raft) followerTick() {
 }
 
 func (r *Raft) candidateTick() {
+	r.tryApplyCommitedLogs()
+	r.tryRemoveRedudentLog()
+
 	now := time.Now()
 
 	if now.Sub(r.resetElectionTimeoutTime) > electionTimeout {
@@ -573,10 +594,10 @@ func (r *Raft) broadcastAppendEntries() {
 		nextLogIndex := r.nextIndex[insID] // next Index for the instance to receive
 		prevLogTerm, prevLogIndex := r.LogList.FindLogBefore(nextLogIndex)
 		entries := r.LogList.GetEntries(nextLogIndex)
-
-		if len(entries) > 0 {
-			log.Printf("%s APPEND %d LOG %d ~ %d", r, insID, entries[0].Index, entries[len(entries)-1].Index)
-		}
+		//
+		//if len(entries) > 0 {
+		//	log.Printf("%s APPEND %d LOG %d ~ %d", r, insID, entries[0].Index, entries[len(entries)-1].Index)
+		//}
 
 		msg := &AppendEntriesMessage{
 			Term:         r.currentTerm,
@@ -619,19 +640,36 @@ func (r *Raft) tryCommitLogs() {
 
 func (r *Raft) tryApplyCommitedLogs() {
 	assert.LessOrEqual(r.Logger, uint64(r.LastAppliedIndex), uint64(r.CommitIndex))
-	for index := r.LastAppliedIndex + 1; index <= r.CommitIndex; index++ {
-		// apply the log
-		log := r.LogList.Logs[index-1]
-		assert.Equal(r.Logger, log.Index, index)
-		r.Logger.Infof("%s APPLY %d#%d", r, log.Term, log.Index)
+	startApplyLogIndex := r.LastAppliedIndex + 1
+	stopApplyLogIndex := r.CommitIndex
+	if startApplyLogIndex >= stopApplyLogIndex {
+		return
+	}
 
-		r.ss.Apply(log.Data)
-		r.LastAppliedIndex = index
+	for applyLogIndex := r.LastAppliedIndex + 1; applyLogIndex <= r.CommitIndex; applyLogIndex++ {
+		// apply the log
+		applyIdx := r.LogList.LogIndexToIndex(applyLogIndex)
+		assert.GreaterOrEqual(r.Logger, applyIdx, 0)         // assert applyIdx >= 0 because applyIdx is not applied yet, so it is not removed yet
+		assert.Less(r.Logger, applyIdx, len(r.LogList.Logs)) // assert applyIdx is valid index, because applyLogIndex <= r.CommitIndex
+		applyLog := r.LogList.Logs[applyIdx]
+		//r.Logger.Infof("%s APPLY %d#%d", r, applyLog.Term, applyLog.Index)
+		assert.Equal(r.Logger, applyLogIndex, applyLog.Index)
+
+		r.ss.ApplyLog(applyLog.Data)
+		r.LastAppliedIndex = applyLogIndex
 	}
 }
 
 func (r *Raft) tryRemoveRedudentLog() {
-	if len(r.LogList.Logs) > 0 && r.LogList.Logs[0].Index+1000 < r.LastAppliedIndex {
-		r.LogList.Logs = r.LogList.Logs[1000:]
+	const tooMuchRedudentSize = 100
+	if r.LogList.PrevLogIndex+tooMuchRedudentSize <= r.LastAppliedIndex {
+		assert.GreaterOrEqual(r.Logger, len(r.LogList.Logs), tooMuchRedudentSize)
+		r.LogList.RemoveApplied(tooMuchRedudentSize / 2)
+		assert.LessOrEqual(r.Logger, r.LogList.PrevLogIndex, r.LastAppliedIndex) // make sure only applied log is removed
 	}
+}
+
+// VerifyCorrectness make sure the Raft status is correct
+func (r *Raft) VerifyCorrectness() {
+
 }

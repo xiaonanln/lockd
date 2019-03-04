@@ -7,11 +7,11 @@ import (
 
 type Term = uint64
 
-const InvalidTerm = 0
+const InvalidTerm = Term(0)
 
 type LogIndex = uint64
 
-const InvalidLogIndex = 0
+const InvalidLogIndex = LogIndex(0)
 
 type LogData []byte
 
@@ -53,7 +53,7 @@ type NetworkDevice interface {
 }
 
 type StateMachine interface {
-	Apply(log []byte)
+	ApplyLog(log []byte)
 }
 
 type RPCMessage interface {
