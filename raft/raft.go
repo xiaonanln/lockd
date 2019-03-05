@@ -414,6 +414,7 @@ func (r *Raft) handleAppendEntriesImpl(msg *AppendEntriesMessage) (bool, LogInde
 	var lastLogIndex LogIndex
 	if len(msg.entries) > 0 {
 		//lastLogTerm = msg.entries[len(msg.entries)-1].Term
+		assert.NotNil(r.Logger, msg.entries[len(msg.entries)-1])
 		lastLogIndex = msg.entries[len(msg.entries)-1].Index
 	} else {
 		//lastLogTerm = msg.prevLogTerm
@@ -604,6 +605,7 @@ func (r *Raft) broadcastAppendEntries() {
 		nextLogIndex := r.nextIndex[insID] // next Index for the instance to receive
 		prevLogTerm, prevLogIndex := r.LogList.FindLogBefore(nextLogIndex)
 		entries := r.LogList.GetEntries(nextLogIndex)
+		r.verifyAppendEntriesSound(entries)
 		//
 		//if len(entries) > 0 {
 		//	log.Printf("%s APPEND %d LOG %d ~ %d", r, insID, entries[0].Index, entries[len(entries)-1].Index)
@@ -682,4 +684,8 @@ func (r *Raft) tryRemoveRedudentLog() {
 // VerifyCorrectness make sure the Raft status is correct
 func (r *Raft) VerifyCorrectness() {
 
+}
+
+func (r *Raft) verifyAppendEntriesSound(logs []*Log) {
+	assert.NotNil(r.Logger, logs)
 }

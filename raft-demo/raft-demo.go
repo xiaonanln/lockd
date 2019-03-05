@@ -39,7 +39,7 @@ func main() {
 			r.Input([]byte(inputData))
 		}
 
-		time.Sleep(time.Millisecond)
+		time.Sleep(time.Microsecond * 100)
 		verifyCounter += 1
 		if verifyCounter%1000 == 0 {
 			verifyCorrectness(raftInstances)
