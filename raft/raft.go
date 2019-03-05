@@ -5,11 +5,12 @@ package raft
 import (
 	"context"
 	"fmt"
-	"github.com/stretchr/testify/assert"
 	"log"
 	"math/rand"
 	"sync"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 const (
@@ -298,6 +299,7 @@ func (r *Raft) handleMsg(senderID int, _msg RPCMessage) {
 	case *AppendEntriesACKMessage:
 		r.handleAppendEntriesACK(senderID, msg)
 	case *AppendEntriesMessage:
+		r.verifyAppendEntriesSound(msg.entries)
 		r.handleAppendEntries(msg)
 	case *RequestVoteMessage:
 		r.handleRequestVote(msg)
@@ -686,6 +688,9 @@ func (r *Raft) VerifyCorrectness() {
 
 }
 
-func (r *Raft) verifyAppendEntriesSound(logs []*Log) {
-	assert.NotNil(r.Logger, logs)
+func (r *Raft) verifyAppendEntriesSound(entries []*Log) {
+	//assert.NotNil(r.Logger, entries)
+	for i := 0; i < len(entries); i++ {
+		assert.NotNil(r.Logger, entries[i])
+	}
 }

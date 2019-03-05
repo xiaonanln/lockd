@@ -3,9 +3,10 @@ package demo
 import (
 	"context"
 	"fmt"
-	"github.com/xiaonanln/lockd/raft"
 	"strconv"
 	"sync"
+
+	"github.com/xiaonanln/lockd/raft"
 )
 
 type DemoRaftInstance struct {
@@ -13,6 +14,7 @@ type DemoRaftInstance struct {
 	id       int
 	recvChan chan raft.RecvRPCMessage
 	Raft     *raft.Raft
+	IsBroken bool
 
 	sumAllNumbers int
 }
@@ -47,13 +49,21 @@ func (ins *DemoRaftInstance) Recv() <-chan raft.RecvRPCMessage {
 }
 
 func (ins *DemoRaftInstance) Send(insID int, msg raft.RPCMessage) {
+	if ins.IsBroken {
+		return
+	}
+
 	instancesLock.RLock()
-	instances[insID].recvChan <- raft.RecvRPCMessage{ins.ID(), msg}
+	instances[insID].recvChan <- raft.RecvRPCMessage{ins.ID(), msg.Copy()}
 	instancesLock.RUnlock()
 }
 
 // Broadcast sends message to all other instances
 func (ins *DemoRaftInstance) Broadcast(msg raft.RPCMessage) {
+	if ins.IsBroken {
+		return
+	}
+
 	//log.Printf("%s BROADCAST: %+v", ins, msg)
 	instancesLock.RLock()
 	defer instancesLock.RUnlock()
@@ -62,7 +72,7 @@ func (ins *DemoRaftInstance) Broadcast(msg raft.RPCMessage) {
 			continue
 		}
 
-		other.recvChan <- raft.RecvRPCMessage{ins.ID(), msg}
+		other.recvChan <- raft.RecvRPCMessage{ins.ID(), msg.Copy()}
 	}
 }
 
@@ -77,4 +87,8 @@ func (ins *DemoRaftInstance) ApplyLog(data []byte) {
 
 func (ins *DemoRaftInstance) StateMachineEquals(other *DemoRaftInstance) bool {
 	return ins.sumAllNumbers == other.sumAllNumbers
+}
+
+func (ins *DemoRaftInstance) SetBroken(broken bool) {
+	ins.IsBroken = broken
 }

@@ -2,13 +2,14 @@ package main
 
 import (
 	"context"
-	"github.com/stretchr/testify/assert"
-	"github.com/xiaonanln/lockd/raft"
-	"github.com/xiaonanln/lockd/raft-demo/demo"
 	"log"
 	"math/rand"
 	"strconv"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/xiaonanln/lockd/raft"
+	"github.com/xiaonanln/lockd/raft-demo/demo"
 )
 
 var (
@@ -17,6 +18,18 @@ var (
 
 const (
 	INSTANCE_NUM = 3
+
+	PERIOD_DURATION = time.Second * 10
+)
+
+type TimePeriod struct {
+	startTime       time.Time
+	duration        time.Duration
+	brokenInstances map[int]struct{}
+}
+
+var (
+	currentPeriod *TimePeriod = nil
 )
 
 func main() {
@@ -30,23 +43,68 @@ func main() {
 
 	verifyCounter := 0
 	inputCounter := 0
+
+	currentPeriod = newTimePeriod()
+
+	applyTimePeriod := func() {
+		for i := 0; i < INSTANCE_NUM; i++ {
+			ins := raftInstances[i]
+			ins.SetBroken(currentPeriod.isBroken(i))
+		}
+	}
+
+	applyTimePeriod()
 	for {
 		randInsIdx := rand.Intn(INSTANCE_NUM)
 		inputCounter = inputCounter + 1
 		inputData := strconv.Itoa(inputCounter)
 		r := raftInstances[randInsIdx].Raft
+		r.Lock()
 		if r.Mode() == raft.Leader {
 			r.Input([]byte(inputData))
 		}
+		r.Unlock()
 
-		time.Sleep(time.Microsecond * 100)
+		time.Sleep(time.Millisecond)
 		verifyCounter += 1
 		if verifyCounter%1000 == 0 {
 			verifyCorrectness(raftInstances)
 		}
+
+		if currentPeriod.isTimeout() {
+			currentPeriod = newTimePeriod()
+			applyTimePeriod()
+		}
 	}
 
 	<-ctx.Done()
+}
+
+func newTimePeriod() *TimePeriod {
+	tp := &TimePeriod{
+		startTime:       time.Now(),
+		duration:        PERIOD_DURATION,
+		brokenInstances: map[int]struct{}{},
+	}
+
+	r := rand.Intn(INSTANCE_NUM + 1)
+	if r != INSTANCE_NUM {
+		log.Printf("So bad, instance %d is BROKEN!", r)
+		tp.brokenInstances[r] = struct{}{}
+	} else {
+		log.Printf("Good, every instance is working")
+	}
+
+	return tp
+}
+
+func (tp *TimePeriod) isBroken(idx int) bool {
+	_, ok := tp.brokenInstances[idx]
+	return ok
+}
+
+func (tp *TimePeriod) isTimeout() bool {
+	return time.Now().After(tp.startTime.Add(tp.duration))
 }
 
 func verifyCorrectness(instances []*demo.DemoRaftInstance) {

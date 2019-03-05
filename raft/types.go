@@ -58,6 +58,7 @@ type StateMachine interface {
 
 type RPCMessage interface {
 	GetTerm() Term
+	Copy() RPCMessage
 }
 
 type AppendEntriesMessage struct {
@@ -79,11 +80,23 @@ func (m *AppendEntriesMessage) GetTerm() Term {
 	return m.Term
 }
 
+func (msg *AppendEntriesMessage) Copy() RPCMessage {
+	copy := *msg
+	// copy entries from old to new
+	copy.entries = append([]*Log{}, msg.entries...)
+	return &copy
+}
+
 type AppendEntriesACKMessage struct {
 	Term    Term
 	success bool
 	// last LogList Index of the AppendEntries message when success, equals to prevLogIndex if entries is empty
 	lastLogIndex LogIndex
+}
+
+func (msg *AppendEntriesACKMessage) Copy() RPCMessage {
+	copy := *msg
+	return &copy
 }
 
 func (m *AppendEntriesACKMessage) GetTerm() Term {
@@ -104,10 +117,19 @@ type RequestVoteMessage struct {
 func (m *RequestVoteMessage) GetTerm() Term {
 	return m.Term
 }
+func (msg *RequestVoteMessage) Copy() RPCMessage {
+	copy := *msg
+	return &copy
+}
 
 type RequestVoteACKMessage struct {
 	Term        Term
 	voteGranted bool
+}
+
+func (msg *RequestVoteACKMessage) Copy() RPCMessage {
+	copy := *msg
+	return &copy
 }
 
 func (m *RequestVoteACKMessage) GetTerm() Term {
