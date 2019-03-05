@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/xiaonanln/go-xnsyncutil/xnsyncutil"
+
 	"github.com/xiaonanln/lockd/raft"
 )
 
@@ -14,7 +16,7 @@ type DemoRaftInstance struct {
 	id       int
 	recvChan chan raft.RecvRPCMessage
 	Raft     *raft.Raft
-	IsBroken bool
+	IsBroken xnsyncutil.AtomicBool
 
 	sumAllNumbers int
 }
@@ -49,7 +51,7 @@ func (ins *DemoRaftInstance) Recv() <-chan raft.RecvRPCMessage {
 }
 
 func (ins *DemoRaftInstance) Send(insID int, msg raft.RPCMessage) {
-	if ins.IsBroken {
+	if ins.IsBroken.Load() {
 		return
 	}
 
@@ -60,7 +62,7 @@ func (ins *DemoRaftInstance) Send(insID int, msg raft.RPCMessage) {
 
 // Broadcast sends message to all other instances
 func (ins *DemoRaftInstance) Broadcast(msg raft.RPCMessage) {
-	if ins.IsBroken {
+	if ins.IsBroken.Load() {
 		return
 	}
 
@@ -90,5 +92,5 @@ func (ins *DemoRaftInstance) StateMachineEquals(other *DemoRaftInstance) bool {
 }
 
 func (ins *DemoRaftInstance) SetBroken(broken bool) {
-	ins.IsBroken = broken
+	ins.IsBroken.Store(broken)
 }

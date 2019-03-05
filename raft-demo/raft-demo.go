@@ -65,7 +65,7 @@ func main() {
 		}
 		r.Unlock()
 
-		time.Sleep(time.Millisecond)
+		time.Sleep(time.Microsecond * 100)
 		verifyCounter += 1
 		if verifyCounter%1000 == 0 {
 			verifyCorrectness(raftInstances)
@@ -87,13 +87,13 @@ func newTimePeriod() *TimePeriod {
 		brokenInstances: map[int]struct{}{},
 	}
 
-	r := rand.Intn(INSTANCE_NUM + 1)
-	if r != INSTANCE_NUM {
-		log.Printf("So bad, instance %d is BROKEN!", r)
-		tp.brokenInstances[r] = struct{}{}
-	} else {
-		log.Printf("Good, every instance is working")
-	}
+	//r := rand.Intn(INSTANCE_NUM + 1)
+	//if r != INSTANCE_NUM {
+	//	log.Printf("So bad, instance %d is BROKEN!", r)
+	//	tp.brokenInstances[r] = struct{}{}
+	//} else {
+	//	log.Printf("Good, every instance is working")
+	//}
 
 	return tp
 }
