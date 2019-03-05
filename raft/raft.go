@@ -286,11 +286,12 @@ forloop:
 
 func (r *Raft) handleMsg(senderID int, _msg RPCMessage) {
 	//All Servers:
-	//?If RPC request or response contains GetTerm T > currentTerm:
+	//?If RPC request or response contains Term T > currentTerm:
 	//set currentTerm = T, convert to follower (?.1)
 
-	if r.currentTerm < _msg.GetTerm() {
-		r.enterFollowerMode(_msg.GetTerm())
+	msgTerm := _msg.GetTerm()
+	if r.currentTerm < msgTerm {
+		r.enterFollowerMode(msgTerm)
 	}
 
 	switch msg := _msg.(type) {
@@ -322,7 +323,7 @@ func (r *Raft) handleRequestVote(msg *RequestVoteMessage) {
 }
 
 func (r *Raft) _handleRequestVote(msg *RequestVoteMessage) bool {
-	//1. Reply false if GetTerm < currentTerm (§5.1)
+	//1. Reply false if Term < currentTerm (§5.1)
 	//2. If votedFor is null or candidateId, and candidate’s LogList is at least as up-to-date as receiver’s LogList, grant vote (§5.2, §5.4)
 
 	if msg.Term < r.currentTerm {
@@ -385,7 +386,7 @@ func (r *Raft) handleAppendEntries(msg *AppendEntriesMessage) {
 }
 
 func (r *Raft) handleAppendEntriesImpl(msg *AppendEntriesMessage) (bool, LogIndex) {
-	//1. Reply false if GetTerm < currentTerm (§5.1)
+	//1. Reply false if Term < currentTerm (§5.1)
 	// If this is the leader, then msg.GetTerm < r.currentTerm should always be satisfied, because Raft assures that msg.GetTerm != r.currentTer
 	if msg.Term < r.currentTerm {
 		return false, 0
@@ -393,10 +394,15 @@ func (r *Raft) handleAppendEntriesImpl(msg *AppendEntriesMessage) (bool, LogInde
 
 	if r.mode == Leader {
 		log.Fatalf("should not be leader")
+	} else if r.mode == Candidate {
+		// candidate should convert to follower on AppendEntries RPC
+		// mst.Term should be equal to r.currentTerm for this moment
+		assert.Equal(r.Logger, msg.Term, r.currentTerm)
+		r.enterFollowerMode(msg.Term)
 	}
 
 	r.resetElectionTimeout()
-	//2. Reply false if LogList doesn’t contain an entry at prevLogIndex whose GetTerm matches prevLogTerm (§5.3)
+	//2. Reply false if LogList doesn’t contain an entry at prevLogIndex whose Term matches prevLogTerm (§5.3)
 	//r.Logger.Infof("%s.AppendEntries: %+v", r, msg)
 	appendOk := r.LogList.AppendEntries(msg.prevLogTerm, msg.prevLogIndex, msg.entries)
 	//r.Logger.Infof("%s.handleAppendEntriesImpl: Ok=%v", r, appendOk)
@@ -432,7 +438,7 @@ func (r *Raft) handleAppendEntriesImpl(msg *AppendEntriesMessage) (bool, LogInde
 	return true, lastLogIndex
 }
 
-// isLogUpToDate determines if the LogList of specified GetTerm and Index is at least as up-to-date as r.LogList
+// isLogUpToDate determines if the LogList of specified Term and Index is at least as up-to-date as r.LogList
 func (r *Raft) isLogUpToDate(term Term, logIndex LogIndex) bool {
 	myterm := r.LogList.LastLogTerm()
 	if term < myterm {
@@ -526,7 +532,7 @@ func (r *Raft) sendRequestVote() {
 	//GetTerm candidate’s GetTerm
 	//candidateId candidate requesting vote
 	//lastLogIndex Index of candidate’s last LogList entry (§5.4)
-	//lastLogTerm GetTerm of candidate’s last LogList entry (§5.4)
+	//lastLogTerm Term of candidate’s last LogList entry (§5.4)
 	msg := &RequestVoteMessage{
 		Term:         r.currentTerm,
 		candidateId:  r.ID(),
@@ -544,14 +550,18 @@ func (r *Raft) assureInMode(mode WorkMode) {
 
 // enter follower mode with new GetTerm
 func (r *Raft) enterFollowerMode(term Term) {
-	log.Printf("%s change mode: %s ==> %s, new GetTerm = %d", r, r.mode, Follower, term)
-	r.newTerm(term)
+	log.Printf("%s change mode: %s ==> %s, new Term = %d", r, r.mode, Follower, term)
+	assert.GreaterOrEqual(r.Logger, term, r.currentTerm)
+
 	r.mode = Follower
+	if term > r.currentTerm {
+		r.newTerm(term)
+	}
 }
 
 func (r *Raft) newTerm(term Term) {
 	if r.currentTerm >= term {
-		log.Fatalf("current GetTerm is %d, can not enter follower mode with GetTerm %d", r.currentTerm, term)
+		log.Fatalf("current Term is %d, can not enter follower mode with Term %d", r.currentTerm, term)
 	}
 	r.currentTerm = term
 	r.votedFor = -1
