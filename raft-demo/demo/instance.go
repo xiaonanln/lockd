@@ -2,7 +2,9 @@ package demo
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"strconv"
 	"sync"
 
@@ -18,7 +20,7 @@ type DemoRaftInstance struct {
 	Raft     *raft.Raft
 	IsBroken xnsyncutil.AtomicBool
 
-	sumAllNumbers int
+	sumAllNumbers int64
 }
 
 var (
@@ -84,7 +86,26 @@ func (ins *DemoRaftInstance) ApplyLog(data []byte) {
 		panic(err)
 	}
 
-	ins.sumAllNumbers += n
+	ins.sumAllNumbers += int64(n)
+}
+
+func (ins *DemoRaftInstance) Snapshot(w io.Writer) error {
+	var b [8]byte
+	binary.LittleEndian.PutUint64(b[:], uint64(ins.sumAllNumbers))
+	_, err := w.Write(b[:])
+	return err
+}
+
+func (ins *DemoRaftInstance) InstallSnapshot(r io.Reader) error {
+	var b [8]byte
+	_, err := io.ReadFull(r, b[:])
+	if err != nil {
+		return err
+	}
+
+	v := binary.LittleEndian.Uint64(b[:])
+	ins.sumAllNumbers = int64(v)
+	return nil
 }
 
 func (ins *DemoRaftInstance) StateMachineEquals(other *DemoRaftInstance) bool {

@@ -3,6 +3,7 @@ package raft
 // Read raft paper at https://raft.github.io/raft.pdf
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
@@ -41,18 +42,23 @@ func (ll *LogList) LastLogIndex() LogIndex {
 	}
 }
 
-func (ll *LogList) FindLogBefore(logIndex LogIndex) (prevTerm Term, prevLogIndex LogIndex) {
+func (ll *LogList) FindLogBefore(logIndex LogIndex) (ok bool, prevTerm Term, prevLogIndex LogIndex) {
 	idx := ll.LogIndexToIndex(logIndex)
 	if idx > 0 {
 		//defaultSugaredLogger.Infof("idx=%v, ll.Logs=%v", idx, len(ll.Logs))
 		prevLog := ll.Logs[idx-1]
 		prevTerm, prevLogIndex = prevLog.Term, prevLog.Index
+		ok = true
 	} else if idx == 0 {
 		// this is the first log, so the previous one is already applied
 		prevTerm, prevLogIndex = ll.PrevLogTerm, ll.PrevLogIndex
+		ok = true
 	} else {
 		// idx < 0 ? can not handle this case now, todo: handle this case
-		assert.Failf(defaultSugaredLogger, "FindLogBefore", "can not find prev term & index for log index %v", logIndex)
+		// log is already snapchated, we have to send snapchat to the client
+		//assert.Failf(defaultSugaredLogger, "FindLogBefore", "can not find prev term & index for log index %v, PrevLogIndex=%v", logIndex, ll.PrevLogIndex)
+		prevTerm, prevLogIndex = InvalidTerm, InvalidLogIndex
+		ok = false
 	}
 	return
 }
@@ -172,6 +178,7 @@ type Raft struct {
 	CommitIndex LogIndex
 	// Index of highest LogList entry applied to state machine (initialized to 0, increases monotonically)
 	LastAppliedIndex LogIndex
+	LastAppliedTerm  Term
 
 	// all state fields
 	resetElectionTimeoutTime time.Time
@@ -305,6 +312,8 @@ func (r *Raft) handleMsg(senderID int, _msg RPCMessage) {
 		r.handleRequestVote(msg)
 	case *RequestVoteACKMessage:
 		r.handleRequestVoteACKMessage(msg)
+	case *InstallSnapshotRPCMessage:
+		r.handleInstallSnapshotRPCMessage(msg)
 	default:
 		log.Fatalf("unexpected message type: %T", _msg)
 	}
@@ -441,6 +450,10 @@ func (r *Raft) handleAppendEntriesImpl(msg *AppendEntriesMessage) (bool, LogInde
 	return true, lastLogIndex
 }
 
+func (r *Raft) handleInstallSnapshotRPCMessage(msg *InstallSnapshotRPCMessage) {
+	// todo: install snapshot
+}
+
 // isLogUpToDate determines if the LogList of specified Term and Index is at least as up-to-date as r.LogList
 func (r *Raft) isLogUpToDate(term Term, logIndex LogIndex) bool {
 	myterm := r.LogList.LastLogTerm()
@@ -504,7 +517,7 @@ func (r *Raft) resetElectionTimeout() {
 func (r *Raft) prepareElection() {
 	r.assureInMode(Candidate)
 
-	log.Printf("%s prepare election ...", r)
+	log.Printf("%s prepare election in term %d...", r, r.currentTerm)
 	r.startElectionTime = time.Now().Add(time.Duration(rand.Int63n(int64(maxStartElectionDelay))))
 	r.electionStarted = false
 	r.resetElectionTimeout()
@@ -605,24 +618,39 @@ func (r *Raft) broadcastAppendEntries() {
 		}
 
 		nextLogIndex := r.nextIndex[insID] // next Index for the instance to receive
-		prevLogTerm, prevLogIndex := r.LogList.FindLogBefore(nextLogIndex)
-		entries := r.LogList.GetEntries(nextLogIndex)
-		r.verifyAppendEntriesSound(entries)
-		//
-		//if len(entries) > 0 {
-		//	log.Printf("%s APPEND %d LOG %d ~ %d", r, insID, entries[0].Index, entries[len(entries)-1].Index)
-		//}
+		ok, prevLogTerm, prevLogIndex := r.LogList.FindLogBefore(nextLogIndex)
+		if ok {
+			entries := r.LogList.GetEntries(nextLogIndex)
+			r.verifyAppendEntriesSound(entries)
 
-		msg := &AppendEntriesMessage{
-			Term:         r.currentTerm,
-			leaderId:     r.ID(),
-			prevLogTerm:  prevLogTerm,
-			prevLogIndex: prevLogIndex,
-			leaderCommit: r.CommitIndex,
-			entries:      entries,
+			msg := &AppendEntriesMessage{
+				Term:         r.currentTerm,
+				leaderId:     r.ID(),
+				prevLogTerm:  prevLogTerm,
+				prevLogIndex: prevLogIndex,
+				leaderCommit: r.CommitIndex,
+				entries:      entries,
+			}
+			r.ins.Send(insID, msg)
+		} else {
+			// this follower is too far behind to append entries, we need install snapshot to it
+			buf := bytes.NewBuffer([]byte{})
+			err := r.ss.Snapshot(buf)
+			if err != nil {
+				defaultSugaredLogger.Warnf("Snapshot failed: %v", err)
+				return
+			}
+
+			msg := &InstallSnapshotRPCMessage{
+				Term:      r.currentTerm,
+				leaderID:  r.ID(),
+				lastIndex: r.LastAppliedIndex,
+				lastTerm:  r.LastAppliedTerm,
+				data:      buf.Bytes(),
+				//lastConfig: "", // todo: put config here
+			}
+			r.ins.Send(insID, msg)
 		}
-
-		r.ins.Send(insID, msg)
 	}
 }
 
@@ -671,6 +699,7 @@ func (r *Raft) tryApplyCommitedLogs() {
 
 		r.ss.ApplyLog(applyLog.Data)
 		r.LastAppliedIndex = applyLogIndex
+		r.LastAppliedTerm = applyLog.Term
 	}
 }
 
