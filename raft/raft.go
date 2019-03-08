@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pkg/errors"
+
 	"github.com/stretchr/testify/assert"
 )
 
@@ -21,24 +23,43 @@ const (
 )
 
 type LogList struct {
-	PrevLogTerm  Term
-	PrevLogIndex LogIndex
-	Logs         []*Log
+	Snapshot *Snapshot
+	Logs     []*Log
 }
 
-func (ll *LogList) LastLogTerm() Term {
+func (ll *LogList) LastTerm() Term {
 	if len(ll.Logs) > 0 {
 		return ll.Logs[len(ll.Logs)-1].Term
+	} else if ll.Snapshot != nil {
+		return ll.Snapshot.LastTerm
 	} else {
-		return ll.PrevLogTerm
+		return InvalidTerm
 	}
 }
 
-func (ll *LogList) LastLogIndex() LogIndex {
+func (ll *LogList) LastIndex() LogIndex {
 	if len(ll.Logs) > 0 {
 		return ll.Logs[len(ll.Logs)-1].Index
+	} else if ll.Snapshot != nil {
+		return ll.Snapshot.LastIndex
 	} else {
-		return ll.PrevLogIndex
+		return InvalidLogIndex
+	}
+}
+
+func (ll *LogList) SnapshotLastTerm() Term {
+	if ll.Snapshot != nil {
+		return ll.Snapshot.LastTerm
+	} else {
+		return InvalidTerm
+	}
+}
+
+func (ll *LogList) SnapshotLastIndex() LogIndex {
+	if ll.Snapshot != nil {
+		return ll.Snapshot.LastIndex
+	} else {
+		return InvalidLogIndex
 	}
 }
 
@@ -51,7 +72,7 @@ func (ll *LogList) FindLogBefore(logIndex LogIndex) (ok bool, prevTerm Term, pre
 		ok = true
 	} else if idx == 0 {
 		// this is the first log, so the previous one is already applied
-		prevTerm, prevLogIndex = ll.PrevLogTerm, ll.PrevLogIndex
+		prevTerm, prevLogIndex = ll.SnapshotLastTerm(), ll.SnapshotLastIndex()
 		ok = true
 	} else {
 		// idx < 0 ? can not handle this case now, todo: handle this case
@@ -69,7 +90,7 @@ func (ll *LogList) GetEntries(startLogIndex LogIndex) []*Log {
 }
 
 func (ll *LogList) Append(data []byte, term Term) *Log {
-	index := ll.LastLogIndex() + 1
+	index := ll.LastIndex() + 1
 	newlog := &Log{
 		Term:  term,
 		Index: index,
@@ -120,10 +141,11 @@ func (ll *LogList) AppendEntries(prevTerm Term, prevIndex LogIndex, entries []*L
 
 // LocateLog find the index for the log index
 func (ll *LogList) LogIndexToIndex(index LogIndex) int {
-	if index >= ll.PrevLogIndex {
-		return int(index-ll.PrevLogIndex) - 1
+	snapshotLastIndex := ll.SnapshotLastIndex()
+	if index >= snapshotLastIndex {
+		return int(index-snapshotLastIndex) - 1
 	} else {
-		return -int(ll.PrevLogIndex-index) - 1
+		return -int(snapshotLastIndex-index) - 1
 	}
 }
 
@@ -147,13 +169,13 @@ func (ll *LogList) LocateLog(term Term, index LogIndex) (bool, int) {
 	return true, idx
 }
 
-func (ll *LogList) RemoveApplied(num int) {
-	removedEntries := ll.Logs[:num]
-	ll.Logs = ll.Logs[num:]
-	lastRemovedLog := removedEntries[len(removedEntries)-1]
-	ll.PrevLogTerm = lastRemovedLog.Term
-	ll.PrevLogIndex = lastRemovedLog.Index
-}
+//func (ll *LogList) RemoveApplied(num int) {
+//	removedEntries := ll.Logs[:num]
+//	ll.Logs = ll.Logs[num:]
+//	lastRemovedLog := removedEntries[len(removedEntries)-1]
+//	ll.PrevLogTerm = lastRemovedLog.Term
+//	ll.PrevLogIndex = lastRemovedLog.Index
+//}
 
 func (ll *LogList) GetLog(logIndex LogIndex) *Log {
 	idx := ll.LogIndexToIndex(logIndex)
@@ -218,12 +240,9 @@ func NewRaft(ctx context.Context, instanceNum int, ins NetworkDevice, ss StateMa
 		mode:                     Follower,
 		resetElectionTimeoutTime: time.Now(),
 		// init raft states
-		currentTerm: 0,
-		votedFor:    -1,
-		LogList: LogList{
-			PrevLogTerm:  0,
-			PrevLogIndex: 0,
-		},
+		currentTerm:      0,
+		votedFor:         -1,
+		LogList:          LogList{},
 		CommitIndex:      0,
 		LastAppliedIndex: 0,
 		Logger:           defaultSugaredLogger,
@@ -239,7 +258,7 @@ func (r *Raft) ID() int {
 }
 
 func (r *Raft) String() string {
-	return fmt.Sprintf("Raft<%d|%v|%d#%d|C%d|A%d>", r.ins.ID(), r.mode, r.currentTerm, r.LogList.LastLogIndex(), r.CommitIndex, r.LastAppliedIndex)
+	return fmt.Sprintf("Raft<%d|%v|%d#%d|C%d|A%d>", r.ins.ID(), r.mode, r.currentTerm, r.LogList.LastIndex(), r.CommitIndex, r.LastAppliedIndex)
 }
 
 func (r *Raft) Mode() WorkMode {
@@ -369,6 +388,12 @@ func (r *Raft) handleAppendEntriesACK(senderID int, msg *AppendEntriesACKMessage
 		return
 	}
 
+	if msg.Term < r.currentTerm {
+		// Ack of previous term ... Meaning this leader was leader of msg.Term and now becomes the leader of current term
+		// Should ignore this RPC? This is a very very rare case and I think it is OK to ignore.
+		return
+	}
+
 	//r.Logger.Infof("%s.handleAppendEntriesACK: %v success=%v", r, senderID, msg.success)
 	// assert msg.GetTerm <= r.currentTerm
 	if msg.success {
@@ -452,18 +477,23 @@ func (r *Raft) handleAppendEntriesImpl(msg *AppendEntriesMessage) (bool, LogInde
 
 func (r *Raft) handleInstallSnapshotRPCMessage(msg *InstallSnapshotRPCMessage) {
 	// todo: install snapshot
+
+	rddata := bytes.NewBuffer(msg.data)
+	err := r.ss.InstallSnapshot(rddata)
+	assert.NoError(r.Logger, err)
+	panic(errors.Errorf("install snapshot rpc message can not be handled"))
 }
 
 // isLogUpToDate determines if the LogList of specified Term and Index is at least as up-to-date as r.LogList
 func (r *Raft) isLogUpToDate(term Term, logIndex LogIndex) bool {
-	myterm := r.LogList.LastLogTerm()
+	myterm := r.LogList.LastTerm()
 	if term < myterm {
 		return false
 	} else if term > myterm {
 		return true
 	}
 
-	return logIndex >= r.LogList.LastLogIndex()
+	return logIndex >= r.LogList.LastIndex()
 }
 
 func (r *Raft) followerTick() {
@@ -552,8 +582,8 @@ func (r *Raft) sendRequestVote() {
 	msg := &RequestVoteMessage{
 		Term:         r.currentTerm,
 		candidateId:  r.ID(),
-		lastLogIndex: r.LogList.LastLogIndex(),
-		lastLogTerm:  r.LogList.LastLogTerm(),
+		lastLogIndex: r.LogList.LastIndex(),
+		lastLogTerm:  r.LogList.LastTerm(),
 	}
 	r.ins.Broadcast(msg)
 }
@@ -605,7 +635,7 @@ func (r *Raft) enterLeaderMode() {
 	r.lastAppendEntriesRPCTime = time.Time{}
 	r.nextIndex = make([]LogIndex, r.instanceNum)
 	for i := range r.nextIndex {
-		r.nextIndex[i] = r.LogList.LastLogIndex() + 1
+		r.nextIndex[i] = r.LogList.LastIndex() + 1
 	}
 	r.matchIndex = make([]LogIndex, r.instanceNum)
 }
@@ -634,22 +664,22 @@ func (r *Raft) broadcastAppendEntries() {
 			r.ins.Send(insID, msg)
 		} else {
 			// this follower is too far behind to append entries, we need install snapshot to it
-			buf := bytes.NewBuffer([]byte{})
-			err := r.ss.Snapshot(buf)
-			if err != nil {
-				defaultSugaredLogger.Warnf("Snapshot failed: %v", err)
-				return
-			}
-
-			msg := &InstallSnapshotRPCMessage{
-				Term:      r.currentTerm,
-				leaderID:  r.ID(),
-				lastIndex: r.LastAppliedIndex,
-				lastTerm:  r.LastAppliedTerm,
-				data:      buf.Bytes(),
-				//lastConfig: "", // todo: put config here
-			}
-			r.ins.Send(insID, msg)
+			//buf := bytes.NewBuffer([]byte{})
+			//err := r.ss.Snapshot(buf)
+			//if err != nil {
+			//	defaultSugaredLogger.Warnf("Snapshot failed: %v", err)
+			//	return
+			//}
+			//
+			//msg := &InstallSnapshotRPCMessage{
+			//	Term:      r.currentTerm,
+			//	leaderID:  r.ID(),
+			//	lastIndex: r.LastAppliedIndex,
+			//	lastTerm:  r.LastAppliedTerm,
+			//	data:      buf.Bytes(),
+			//	//lastConfig: "", // todo: put config here
+			//}
+			//r.ins.Send(insID, msg)
 		}
 	}
 }
@@ -704,12 +734,12 @@ func (r *Raft) tryApplyCommitedLogs() {
 }
 
 func (r *Raft) tryRemoveRedudentLog() {
-	const tooMuchRedudentSize = 100
-	if r.LogList.PrevLogIndex+tooMuchRedudentSize <= r.LastAppliedIndex {
-		assert.GreaterOrEqual(r.Logger, len(r.LogList.Logs), tooMuchRedudentSize)
-		r.LogList.RemoveApplied(tooMuchRedudentSize / 2)
-		assert.LessOrEqual(r.Logger, r.LogList.PrevLogIndex, r.LastAppliedIndex) // make sure only applied log is removed
-	}
+	//const tooMuchRedudentSize = 100
+	//if r.LogList.PrevLogIndex+tooMuchRedudentSize <= r.LastAppliedIndex {
+	//	assert.GreaterOrEqual(r.Logger, len(r.LogList.Logs), tooMuchRedudentSize)
+	//	r.LogList.RemoveApplied(tooMuchRedudentSize / 2)
+	//	assert.LessOrEqual(r.Logger, r.LogList.PrevLogIndex, r.LastAppliedIndex) // make sure only applied log is removed
+	//}
 }
 
 // VerifyCorrectness make sure the Raft status is correct

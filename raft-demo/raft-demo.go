@@ -153,8 +153,8 @@ func verifyCorrectness(instances []*demo.DemoRaftInstance) {
 	for i := 0; i < INSTANCE_NUM; i++ {
 		r := raftInstances[i].Raft
 		assert.LessOrEqual(r.Logger, r.CommitIndex, leaderCommitIndex)
-		if minLogIndex < r.LogList.PrevLogIndex+1 {
-			minLogIndex = r.LogList.PrevLogIndex + 1
+		if minLogIndex < r.LogList.SnapshotLastIndex()+1 {
+			minLogIndex = r.LogList.SnapshotLastIndex() + 1
 		}
 		if r.LastAppliedIndex != leader.LastAppliedIndex {
 			isAllAppliedLogIndexSame = false

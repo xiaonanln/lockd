@@ -70,3 +70,9 @@ type Logger interface {
 	Infof(format string, args ...interface{})
 	Errorf(format string, args ...interface{})
 }
+
+type Snapshot struct {
+	Data      []byte
+	LastTerm  Term
+	LastIndex LogIndex
+}

@@ -100,3 +100,16 @@ func (msg *InstallSnapshotRPCMessage) Copy() RPCMessage {
 	copy := *msg
 	return &copy
 }
+
+type InstallSnapshotACKMessage struct {
+	Term Term
+}
+
+func (msg *InstallSnapshotACKMessage) GetTerm() Term {
+	return msg.Term
+}
+
+func (msg *InstallSnapshotACKMessage) Copy() RPCMessage {
+	copy := *msg
+	return &copy
+}
