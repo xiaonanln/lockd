@@ -8,8 +8,8 @@ type RPCMessage interface {
 type AppendEntriesMessage struct {
 	//GetTerm leader’s GetTerm
 	Term Term
-	//leaderId so follower can redirect clients
-	leaderId int
+	//leaderID so follower can redirect clients
+	leaderID int
 	//prevLogIndex Index of LogList entry immediately preceding new ones
 	prevLogIndex LogIndex
 	//prevLogTerm GetTerm of prevLogIndex entry
@@ -81,22 +81,23 @@ func (m *RequestVoteACKMessage) GetTerm() Term {
 }
 
 //Invoked by leader to send chunks of a snapshot to a follower
-type InstallSnapshotRPCMessage struct {
-	Term      Term     // leader's term
-	leaderID  int      // so follower can redirect clients
-	lastIndex LogIndex // the snapshot replaces all entries up through and including this index
-	lastTerm  Term     // term of lastIndex
-	//lastConfig string   // latest cluster configuration as of lastIndex (include only with first chunk)
-	//offset     int64    // byte offset where chunk is positioned in the snapshot file
-	data []byte // raw bytes of snapshot chunk starting at offset
-	//done bool   //true if this is the last chunk
+type InstallSnapshotMessage struct {
+	Term     Term // leader's term
+	leaderID int  // so follower can redirect clients
+	Snapshot *Snapshot
+	//lastIndex LogIndex // the snapshot replaces all entries up through and including this index
+	//lastTerm  Term     // term of lastIndex
+	////lastConfig string   // latest cluster configuration as of lastIndex (include only with first chunk)
+	////offset     int64    // byte offset where chunk is positioned in the snapshot file
+	//data []byte // raw bytes of snapshot chunk starting at offset
+	////done bool   //true if this is the last chunk
 }
 
-func (msg *InstallSnapshotRPCMessage) GetTerm() Term {
+func (msg *InstallSnapshotMessage) GetTerm() Term {
 	return msg.Term
 }
 
-func (msg *InstallSnapshotRPCMessage) Copy() RPCMessage {
+func (msg *InstallSnapshotMessage) Copy() RPCMessage {
 	copy := *msg
 	return &copy
 }

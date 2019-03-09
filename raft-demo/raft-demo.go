@@ -65,7 +65,7 @@ func main() {
 		}
 		r.Unlock()
 
-		time.Sleep(time.Microsecond * 100)
+		time.Sleep(time.Microsecond * 1000)
 		verifyCounter += 1
 		if verifyCounter%1000 == 0 {
 			verifyCorrectness(raftInstances)
@@ -152,7 +152,7 @@ func verifyCorrectness(instances []*demo.DemoRaftInstance) {
 	// other raft instances should not have larger commit logIndex
 	for i := 0; i < INSTANCE_NUM; i++ {
 		r := raftInstances[i].Raft
-		assert.LessOrEqual(r.Logger, r.CommitIndex, leaderCommitIndex)
+		//assert.LessOrEqual(r.Logger, r.CommitIndex, leaderCommitIndex) // not necessary so
 		if minLogIndex < r.LogList.SnapshotLastIndex()+1 {
 			minLogIndex = r.LogList.SnapshotLastIndex() + 1
 		}

@@ -27,6 +27,10 @@ type LogList struct {
 	Logs     []*Log
 }
 
+func (ll *LogList) String() string {
+	return fmt.Sprintf("LogList[%s->%d#%d]", ll.Snapshot, ll.LastTerm(), ll.LastIndex())
+}
+
 func (ll *LogList) LastTerm() Term {
 	if len(ll.Logs) > 0 {
 		return ll.Logs[len(ll.Logs)-1].Term
@@ -183,6 +187,34 @@ func (ll *LogList) GetLog(logIndex LogIndex) *Log {
 	return ll.Logs[idx]
 }
 
+func (ll *LogList) SetSnapshot(snapshot *Snapshot) bool {
+	assert.True(defaultSugaredLogger, snapshot.LastTerm > InvalidTerm)
+	assert.True(defaultSugaredLogger, snapshot.LastIndex > InvalidLogIndex)
+
+	if ll.Snapshot != nil && ll.Snapshot.LastIndex >= snapshot.LastIndex {
+		// no need to install it because my snapshot is even newer
+		defaultSugaredLogger.Infof("set snapshot ignored: LastIndex=%d, existing snapshot.LastIndex=%d", snapshot.LastIndex, ll.Snapshot.LastIndex)
+		return false
+	}
+
+	// ll.Snapshot == nil || ll.Snapshot.LastIndex > snapshot.LastIndex
+	localSnapshotLastIndex := ll.SnapshotLastIndex()
+	ll.Snapshot = snapshot
+
+	// remove all logs that is already in loglist with Index < snapshot.LastIndex
+	discardLogNum := int(snapshot.LastIndex - localSnapshotLastIndex)
+	if discardLogNum > len(ll.Logs) {
+		discardLogNum = len(ll.Logs)
+	}
+
+	if discardLogNum > 0 {
+		ll.Logs = ll.Logs[discardLogNum:]
+	}
+
+	//defaultSugaredLogger.Infof("set snapshot succeed: snapshot.LastIndex=%d, last log = %d#%d", ll.SnapshotLastIndex(), ll.LastTerm(), ll.LastIndex())
+	return true
+}
+
 type Raft struct {
 	sync.Mutex // for locking
 
@@ -258,7 +290,7 @@ func (r *Raft) ID() int {
 }
 
 func (r *Raft) String() string {
-	return fmt.Sprintf("Raft<%d|%v|%d#%d|C%d|A%d>", r.ins.ID(), r.mode, r.currentTerm, r.LogList.LastIndex(), r.CommitIndex, r.LastAppliedIndex)
+	return fmt.Sprintf("Raft<%d|%v|%d|%s|C%d|A%d>", r.ins.ID(), r.mode, r.currentTerm, &r.LogList, r.CommitIndex, r.LastAppliedIndex)
 }
 
 func (r *Raft) Mode() WorkMode {
@@ -331,8 +363,10 @@ func (r *Raft) handleMsg(senderID int, _msg RPCMessage) {
 		r.handleRequestVote(msg)
 	case *RequestVoteACKMessage:
 		r.handleRequestVoteACKMessage(msg)
-	case *InstallSnapshotRPCMessage:
-		r.handleInstallSnapshotRPCMessage(msg)
+	case *InstallSnapshotMessage:
+		r.handleInstallSnapshotMessage(msg)
+	case *InstallSnapshotACKMessage:
+		r.handleInstallSnapshotACKMessage(msg)
 	default:
 		log.Fatalf("unexpected message type: %T", _msg)
 	}
@@ -413,7 +447,7 @@ func (r *Raft) handleAppendEntriesACK(senderID int, msg *AppendEntriesACKMessage
 func (r *Raft) handleAppendEntries(msg *AppendEntriesMessage) {
 	success, lastLogIndex := r.handleAppendEntriesImpl(msg)
 
-	r.ins.Send(msg.leaderId, &AppendEntriesACKMessage{
+	r.ins.Send(msg.leaderID, &AppendEntriesACKMessage{
 		Term:         r.currentTerm,
 		success:      success,
 		lastLogIndex: lastLogIndex,
@@ -428,9 +462,9 @@ func (r *Raft) handleAppendEntriesImpl(msg *AppendEntriesMessage) (bool, LogInde
 		return false, 0
 	}
 
-	if r.mode == Leader {
-		log.Fatalf("should not be leader")
-	} else if r.mode == Candidate {
+	assert.True(r.Logger, r.mode != Leader)
+
+	if r.mode == Candidate {
 		// candidate should convert to follower on AppendEntries RPC
 		// mst.Term should be equal to r.currentTerm for this moment
 		assert.Equal(r.Logger, msg.Term, r.currentTerm)
@@ -475,13 +509,64 @@ func (r *Raft) handleAppendEntriesImpl(msg *AppendEntriesMessage) (bool, LogInde
 	return true, lastLogIndex
 }
 
-func (r *Raft) handleInstallSnapshotRPCMessage(msg *InstallSnapshotRPCMessage) {
+func (r *Raft) handleInstallSnapshotMessage(msg *InstallSnapshotMessage) {
 	// todo: install snapshot
+	if r.handleInstallSnapshotRPCMessageImpl(msg) {
+	}
 
-	rddata := bytes.NewBuffer(msg.data)
-	err := r.ss.InstallSnapshot(rddata)
-	assert.NoError(r.Logger, err)
-	panic(errors.Errorf("install snapshot rpc message can not be handled"))
+	// reply to leader no matter install success or failed
+	r.Logger.Errorf("Sending InstallSnapshotACKMessage to Leader %v", msg.leaderID)
+	r.ins.Send(msg.leaderID, &InstallSnapshotACKMessage{
+		Term: r.currentTerm,
+	})
+}
+func (r *Raft) handleInstallSnapshotRPCMessageImpl(msg *InstallSnapshotMessage) bool {
+	if msg.Term < r.currentTerm {
+		return false
+	}
+
+	assert.True(r.Logger, r.mode != Leader)
+
+	if r.mode == Candidate {
+		// candidate should convert to follower on InstallSnapshot RPC (I believe so because InstallSnapshot is another form of AppendEntries)
+		// mst.Term should be equal to r.currentTerm for this moment
+		assert.Equal(r.Logger, msg.Term, r.currentTerm)
+		r.enterFollowerMode(msg.Term)
+	}
+
+	r.resetElectionTimeout()
+
+	// if the snapshot's LastIndex is smaller than our snapshot's, just ignore this snapshot
+	recvSnapshot := msg.Snapshot
+
+	// the received snapshot is newer than our's
+	// install the snapshot to the LogList and discard log up to snapshot's last term#index
+	if !r.LogList.SetSnapshot(recvSnapshot) {
+		r.Logger.Infof("%s ignored snapshot %s, because local snapshot is #%d", r, recvSnapshot, r.LogList.SnapshotLastIndex())
+		return false
+	}
+
+	// Snapshot from leader implies that leader's commitIndex >= snapshot.LastIndex
+	leaderCommit := recvSnapshot.LastIndex
+	if leaderCommit > r.CommitIndex {
+		r.CommitIndex = leaderCommit
+		//log.Printf("%s COMMITS %d", r, r.CommitIndex)
+	}
+
+	// install snapshot to the machine is as same as apply logs to the last term#index of the snapshot
+	ssrd := bytes.NewBuffer(recvSnapshot.Data)
+	err := r.ss.InstallSnapshot(ssrd)
+	assert.Nil(r.Logger, err)
+	r.LastAppliedTerm = recvSnapshot.LastTerm
+	r.LastAppliedIndex = recvSnapshot.LastIndex
+
+	r.Logger.Infof("%s installed received snapshot %s, local log is %s", r, recvSnapshot, &r.LogList)
+
+	return true
+}
+
+func (r *Raft) handleInstallSnapshotACKMessage(message *InstallSnapshotACKMessage) {
+
 }
 
 // isLogUpToDate determines if the LogList of specified Term and Index is at least as up-to-date as r.LogList
@@ -498,7 +583,7 @@ func (r *Raft) isLogUpToDate(term Term, logIndex LogIndex) bool {
 
 func (r *Raft) followerTick() {
 	r.tryApplyCommitedLogs()
-	r.tryRemoveRedudentLog()
+	r.tryCompactLog()
 
 	now := time.Now()
 	if now.Sub(r.resetElectionTimeoutTime) > electionTimeout {
@@ -508,7 +593,7 @@ func (r *Raft) followerTick() {
 
 func (r *Raft) candidateTick() {
 	r.tryApplyCommitedLogs()
-	r.tryRemoveRedudentLog()
+	r.tryCompactLog()
 
 	now := time.Now()
 
@@ -529,7 +614,7 @@ func (r *Raft) candidateTick() {
 func (r *Raft) leaderTick() {
 	r.tryCommitLogs()
 	r.tryApplyCommitedLogs()
-	r.tryRemoveRedudentLog()
+	r.tryCompactLog()
 
 	now := time.Now()
 	if now.Sub(r.lastAppendEntriesRPCTime) >= leaderAppendEntriesRPCInterval {
@@ -655,7 +740,7 @@ func (r *Raft) broadcastAppendEntries() {
 
 			msg := &AppendEntriesMessage{
 				Term:         r.currentTerm,
-				leaderId:     r.ID(),
+				leaderID:     r.ID(),
 				prevLogTerm:  prevLogTerm,
 				prevLogIndex: prevLogIndex,
 				leaderCommit: r.CommitIndex,
@@ -664,22 +749,14 @@ func (r *Raft) broadcastAppendEntries() {
 			r.ins.Send(insID, msg)
 		} else {
 			// this follower is too far behind to append entries, we need install snapshot to it
-			//buf := bytes.NewBuffer([]byte{})
-			//err := r.ss.Snapshot(buf)
-			//if err != nil {
-			//	defaultSugaredLogger.Warnf("Snapshot failed: %v", err)
-			//	return
-			//}
-			//
-			//msg := &InstallSnapshotRPCMessage{
-			//	Term:      r.currentTerm,
-			//	leaderID:  r.ID(),
-			//	lastIndex: r.LastAppliedIndex,
-			//	lastTerm:  r.LastAppliedTerm,
-			//	data:      buf.Bytes(),
-			//	//lastConfig: "", // todo: put config here
-			//}
-			//r.ins.Send(insID, msg)
+			assert.True(r.Logger, r.LogList.Snapshot != nil)
+			snapshot := r.LogList.Snapshot
+			msg := &InstallSnapshotMessage{
+				Term:     r.currentTerm,
+				leaderID: r.ID(),
+				Snapshot: snapshot,
+			}
+			r.ins.Send(insID, msg)
 		}
 	}
 }
@@ -721,6 +798,8 @@ func (r *Raft) tryApplyCommitedLogs() {
 	for applyLogIndex := r.LastAppliedIndex + 1; applyLogIndex <= r.CommitIndex; applyLogIndex++ {
 		// apply the log
 		applyIdx := r.LogList.LogIndexToIndex(applyLogIndex)
+		// TODO: What if follower received a snapshot and installed to the log list, but failed to install it to the statemachine.
+		// TODO: In this case, the follower's LastAppliedIndex is smaller than the LastIndex of the snapshot, leading to applyIdx < 0
 		assert.GreaterOrEqual(r.Logger, applyIdx, 0)         // assert applyIdx >= 0 because applyIdx is not applied yet, so it is not removed yet
 		assert.Less(r.Logger, applyIdx, len(r.LogList.Logs)) // assert applyIdx is valid index, because applyLogIndex <= r.CommitIndex
 		applyLog := r.LogList.Logs[applyIdx]
@@ -733,13 +812,21 @@ func (r *Raft) tryApplyCommitedLogs() {
 	}
 }
 
-func (r *Raft) tryRemoveRedudentLog() {
-	//const tooMuchRedudentSize = 100
-	//if r.LogList.PrevLogIndex+tooMuchRedudentSize <= r.LastAppliedIndex {
-	//	assert.GreaterOrEqual(r.Logger, len(r.LogList.Logs), tooMuchRedudentSize)
-	//	r.LogList.RemoveApplied(tooMuchRedudentSize / 2)
-	//	assert.LessOrEqual(r.Logger, r.LogList.PrevLogIndex, r.LastAppliedIndex) // make sure only applied log is removed
-	//}
+func (r *Raft) tryCompactLog() error {
+	if r.LastAppliedIndex > r.LogList.SnapshotLastIndex() {
+		buf := bytes.NewBuffer([]byte{})
+		//TODO: take snapshot in another goroutine
+		err := r.ss.Snapshot(buf)
+		if err != nil {
+			defaultSugaredLogger.Warnf("Snapshot failed: %v", err)
+			return errors.Wrapf(err, "snapshot failed: LastAppliedIndex=%v", r.LastAppliedIndex)
+		}
+
+		if r.LogList.SetSnapshot(&Snapshot{buf.Bytes(), r.LastAppliedTerm, r.LastAppliedIndex}) {
+			//r.Logger.Infof("%s compact log: set snapshot to %d#%d", r, r.LastAppliedTerm, r.LastAppliedIndex)
+		}
+	}
+	return nil
 }
 
 // VerifyCorrectness make sure the Raft status is correct

@@ -76,3 +76,11 @@ type Snapshot struct {
 	LastTerm  Term
 	LastIndex LogIndex
 }
+
+func (ss *Snapshot) String() string {
+	if ss != nil {
+		return fmt.Sprintf("Snapshot<%d#%d,size=%d>", ss.LastTerm, ss.LastIndex, len(ss.Data))
+	} else {
+		return fmt.Sprintf("NoSnapshot<0#0>")
+	}
+}
