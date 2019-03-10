@@ -1,0 +1,11 @@
+2019/03/11 01:14:44 Raft<0|leader|382|LogList[Snapshot<382#29648,size=8>->382#31805]|C29664|A29664> change mode: leader ==> follower, new Term = 477
+2019/03/11 01:14:44 found leader: Raft<2|leader|477|LogList[Snapshot<477#29652,size=8>->477#29668]|C29667|A29667>, followers: [Raft<0|follower|477|LogList[Snapshot<477#29652,size=8>->477#29667]|C29664|A29664> Raft<1|follower|477|LogList[Snapshot<382#29650,size=8>->477#29652]|C29661|A29661>]
+panic: runtime error: index out of range
+
+goroutine 1 [running]:
+github.com/xiaonanln/lockd/raft.(*LogList).GetLog(...)
+	E:/gopath/src/github.com/xiaonanln/lockd/raft/raft.go:188
+main.verifyCorrectness(0xc000058b40, 0x3, 0x4)
+	E:/gopath/src/github.com/xiaonanln/lockd/raft-demo/raft-demo.go:221 +0x12b7
+main.main()
+	E:/gopath/src/github.com/xiaonanln/lockd/raft-demo/raft-demo.go:109 +0x513
