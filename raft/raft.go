@@ -528,9 +528,7 @@ func (r *Raft) handleAppendEntriesImpl(msg *AppendEntriesMessage) (bool, LogInde
 		if commitIndex > lastLogIndex {
 			commitIndex = lastLogIndex
 		}
-		if commitIndex < r.CommitIndex {
-			log.Fatalf("New Commit Index Is %d, But Current Commit Index Is %d", commitIndex, r.CommitIndex)
-		}
+		// NOTE: leader might have smaller commit index than followers, it is OK
 		if commitIndex > r.CommitIndex {
 			r.CommitIndex = commitIndex
 			//log.Printf("%s COMMITS %d", r, r.CommitIndex)
