@@ -116,6 +116,7 @@ func (ll *LogList) AppendEntries(prevTerm Term, prevIndex LogIndex, entries []*L
 	if replaceIdx < 0 {
 		// previous log is applied already, so we advance read index by the number of logs in entries that are already applied
 		readIdx += (-replaceIdx)
+		replaceIdx = 0
 	}
 
 	for ; readIdx < len(entries); readIdx++ {

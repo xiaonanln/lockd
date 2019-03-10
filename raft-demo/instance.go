@@ -1,4 +1,4 @@
-package demo
+package main
 
 import (
 	"context"
@@ -7,6 +7,8 @@ import (
 	"io"
 	"strconv"
 	"sync"
+	"time"
+	"unsafe"
 
 	"github.com/xiaonanln/go-xnsyncutil/xnsyncutil"
 
@@ -18,8 +20,8 @@ type DemoRaftInstance struct {
 	id       int
 	recvChan chan raft.RecvRPCMessage
 	Raft     *raft.Raft
-	IsBroken xnsyncutil.AtomicBool
 
+	healthy       xnsyncutil.AtomicPointer
 	sumAllNumbers int64
 }
 
@@ -41,6 +43,21 @@ func NewDemoRaftInstance(ctx context.Context, id int) *DemoRaftInstance {
 	return ins
 }
 
+func getInstance(id int) *DemoRaftInstance {
+	instancesLock.RLock()
+	defer instancesLock.RUnlock()
+	return instances[id]
+}
+
+func getAllInstances() (inss []*DemoRaftInstance) {
+	instancesLock.RLock()
+	defer instancesLock.RUnlock()
+	for _, ins := range instances {
+		inss = append(inss, ins)
+	}
+	return
+}
+
 func (ins *DemoRaftInstance) String() string {
 	return fmt.Sprintf("DemoRaftInstance<%d>", ins.id)
 }
@@ -53,32 +70,30 @@ func (ins *DemoRaftInstance) Recv() <-chan raft.RecvRPCMessage {
 }
 
 func (ins *DemoRaftInstance) Send(insID int, msg raft.RPCMessage) {
-	if ins.IsBroken.Load() {
+	h := ins.GetHealthy()
+
+	if !h.CanSend() {
 		return
 	}
 
-	instancesLock.RLock()
-	if !instances[insID].IsBroken.Load() {
-		instances[insID].recvChan <- raft.RecvRPCMessage{ins.ID(), msg.Copy()}
+	dstInstance := getInstance(insID)
+	dstH := dstInstance.GetHealthy()
+	if !dstH.CanRecv() {
+		return
 	}
-	instancesLock.RUnlock()
+
+	totalDelay := time.Millisecond + h.SendDelay + dstH.RecvDelay
+	time.AfterFunc(totalDelay, func() {
+		dstInstance.recvChan <- raft.RecvRPCMessage{ins.ID(), msg.Copy()}
+	})
 }
 
 // Broadcast sends message to all other instances
 func (ins *DemoRaftInstance) Broadcast(msg raft.RPCMessage) {
-	if ins.IsBroken.Load() {
-		return
-	}
-
-	//log.Printf("%s BROADCAST: %+v", ins, msg)
-	instancesLock.RLock()
-	defer instancesLock.RUnlock()
-	for _, other := range instances {
-		if other == ins {
-			continue
-		}
-		if !other.IsBroken.Load() {
-			other.recvChan <- raft.RecvRPCMessage{ins.ID(), msg.Copy()}
+	allInstances := getAllInstances()
+	for id, dst := range allInstances {
+		if dst != ins {
+			ins.Send(id, msg)
 		}
 	}
 }
@@ -115,6 +130,17 @@ func (ins *DemoRaftInstance) StateMachineEquals(other *DemoRaftInstance) bool {
 	return ins.sumAllNumbers == other.sumAllNumbers
 }
 
-func (ins *DemoRaftInstance) SetBroken(broken bool) {
-	ins.IsBroken.Store(broken)
+func (ins *DemoRaftInstance) SetHealthy(healthy *InstanceHealthy) {
+	ins.healthy.Store(unsafe.Pointer(healthy))
+	if healthy.Crash {
+		demoLogger.Warnf("%s CRASHED!", ins)
+	} else if healthy.NetworkDown {
+		demoLogger.Warnf("%s NETWORK DOWN!", ins)
+	} else {
+		demoLogger.Warnf("%s IS ALIVE!", ins)
+	}
+}
+
+func (ins *DemoRaftInstance) GetHealthy() *InstanceHealthy {
+	return (*InstanceHealthy)(ins.healthy.Load())
 }

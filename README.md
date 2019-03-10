@@ -11,17 +11,17 @@ So, 3 or 5 locking service instances consist a cluster to offer high availabilit
 Yes, I am using this project to learn Raft.
 
 - [ ] Basic Raft Algorithm
-    - [ ] Leader election
-    - [ ] Log replication
-    - [ ] Safety
-    - [ ] Persisted state
+    - [x] Leader election
+    - [x] Log replication
+    - [x] Safety
+    - [ ] Persisted state (won't have)
     - [ ] Server restarts
     - [ ] Leader transfer extension
     
 - [ ] Cluster membership changes
 
 - [ ] Log compaction
-    - [ ] Memory-Based Snapshots
+    - [x] Memory-Based Snapshots
 
 - [ ] Client interaction
     - [ ] Finding the cluster

@@ -9,11 +9,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/xiaonanln/lockd/raft"
-	"github.com/xiaonanln/lockd/raft-demo/demo"
 )
 
 var (
-	raftInstances []*demo.DemoRaftInstance
+	raftInstances []*DemoRaftInstance
 )
 
 const (
@@ -25,18 +24,57 @@ const (
 type TimePeriod struct {
 	startTime       time.Time
 	duration        time.Duration
-	brokenInstances map[int]struct{}
+	instanceHealthy map[int]*InstanceHealthy
+}
+
+type InstanceHealthy struct {
+	Crash       bool
+	NetworkDown bool
+	SendDelay   time.Duration
+	RecvDelay   time.Duration
+}
+
+func newInstanceBroken() *InstanceHealthy {
+	healthy := *InstanceFine
+
+	if rand.Float32() < 0.3 {
+		healthy.Crash = true
+		return &healthy
+	}
+
+	if rand.Float32() < 0.8 {
+		healthy.NetworkDown = true
+		return &healthy
+	}
+
+	healthy.SendDelay = time.Millisecond * time.Duration(rand.Intn(2000))
+	healthy.RecvDelay = time.Millisecond * time.Duration(rand.Intn(2000))
+	return &healthy
+}
+
+func (h *InstanceHealthy) CanSend() bool {
+	return !(h.Crash || h.NetworkDown)
+}
+
+func (h *InstanceHealthy) CanRecv() bool {
+	return !(h.Crash || h.NetworkDown)
 }
 
 var (
 	currentPeriod *TimePeriod = nil
+	InstanceFine              = &InstanceHealthy{
+		Crash:       false,
+		NetworkDown: false,
+		SendDelay:   0,
+		RecvDelay:   0,
+	}
 )
 
 func main() {
 	ctx := context.Background()
 
 	for i := 0; i < INSTANCE_NUM; i++ {
-		ins := demo.NewDemoRaftInstance(ctx, i)
+		ins := NewDemoRaftInstance(ctx, i)
 		raftInstances = append(raftInstances, ins)
 		ins.Raft = raft.NewRaft(ctx, INSTANCE_NUM, ins, ins)
 	}
@@ -49,7 +87,7 @@ func main() {
 	applyTimePeriod := func() {
 		for i := 0; i < INSTANCE_NUM; i++ {
 			ins := raftInstances[i]
-			ins.SetBroken(currentPeriod.isBroken(i))
+			ins.SetHealthy(currentPeriod.instanceHealthy[i])
 		}
 	}
 
@@ -84,22 +122,26 @@ func newTimePeriod() *TimePeriod {
 	tp := &TimePeriod{
 		startTime:       time.Now(),
 		duration:        PERIOD_DURATION,
-		brokenInstances: map[int]struct{}{},
+		instanceHealthy: map[int]*InstanceHealthy{},
 	}
 
-	r := rand.Intn(INSTANCE_NUM + 1)
-	if r != INSTANCE_NUM {
-		log.Printf("So bad, instance %d is BROKEN!", r)
-		tp.brokenInstances[r] = struct{}{}
-	} else {
-		log.Printf("Good, every instance is working")
+	maxBrokenNum := INSTANCE_NUM / 2
+	brokenNum := rand.Intn(maxBrokenNum + 1)
+	for i := 0; i < INSTANCE_NUM; i++ {
+		brokenProb := float64(brokenNum) / float64((INSTANCE_NUM - i))
+		if rand.Float64() < brokenProb {
+			// this instance should be broken
+			tp.instanceHealthy[i] = newInstanceBroken()
+		} else {
+			// this instance should be healthy
+			tp.instanceHealthy[i] = InstanceFine
+		}
 	}
-
 	return tp
 }
 
 func (tp *TimePeriod) isBroken(idx int) bool {
-	_, ok := tp.brokenInstances[idx]
+	_, ok := tp.instanceHealthy[idx]
 	return ok
 }
 
@@ -109,7 +151,7 @@ func (tp *TimePeriod) isTimeout() bool {
 
 var lastLeaderCommitIndex = raft.InvalidLogIndex
 
-func verifyCorrectness(instances []*demo.DemoRaftInstance) {
+func verifyCorrectness(instances []*DemoRaftInstance) {
 	// verify the correctness of Raft algorithm
 	// lock all Raft instances before
 	lock := func() {
