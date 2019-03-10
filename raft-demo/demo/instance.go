@@ -42,7 +42,7 @@ func NewDemoRaftInstance(ctx context.Context, id int) *DemoRaftInstance {
 }
 
 func (ins *DemoRaftInstance) String() string {
-	return fmt.Sprintf("NetworkDevice<%d>", ins.id)
+	return fmt.Sprintf("DemoRaftInstance<%d>", ins.id)
 }
 func (ins *DemoRaftInstance) ID() int {
 	return ins.id

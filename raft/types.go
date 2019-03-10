@@ -46,7 +46,7 @@ func (d LogData) String() string {
 	return sb.String()
 }
 
-type NetworkDevice interface {
+type Transport interface {
 	ID() int
 	Recv() <-chan RecvRPCMessage
 	Send(instanceID int, msg RPCMessage)

@@ -218,7 +218,7 @@ func (ll *LogList) SetSnapshot(snapshot *Snapshot) bool {
 type Raft struct {
 	sync.Mutex // for locking
 
-	ins         NetworkDevice
+	transport   Transport
 	ss          StateMachine
 	ctx         context.Context
 	instanceNum int
@@ -256,17 +256,17 @@ type Raft struct {
 	logInput chan []LogData
 }
 
-func NewRaft(ctx context.Context, instanceNum int, ins NetworkDevice, ss StateMachine) *Raft {
+func NewRaft(ctx context.Context, instanceNum int, transport Transport, ss StateMachine) *Raft {
 	if instanceNum <= 0 {
 		log.Fatalf("instanceNum should be larger than 0")
 	}
 
-	if ins.ID() >= instanceNum {
+	if transport.ID() >= instanceNum {
 		log.Fatalf("instance ID should be smaller than %d", instanceNum)
 	}
 
 	raft := &Raft{
-		ins:                      ins,
+		transport:                transport,
 		ss:                       ss,
 		ctx:                      ctx,
 		instanceNum:              instanceNum,
@@ -287,11 +287,11 @@ func NewRaft(ctx context.Context, instanceNum int, ins NetworkDevice, ss StateMa
 }
 
 func (r *Raft) ID() int {
-	return r.ins.ID()
+	return r.transport.ID()
 }
 
 func (r *Raft) String() string {
-	return fmt.Sprintf("Raft<%d|%v|%d|%s|C%d|A%d>", r.ins.ID(), r.mode, r.currentTerm, &r.LogList, r.CommitIndex, r.LastAppliedIndex)
+	return fmt.Sprintf("Raft<%d|%v|%d|%s|C%d|A%d>", r.transport.ID(), r.mode, r.currentTerm, &r.LogList, r.CommitIndex, r.LastAppliedIndex)
 }
 
 func (r *Raft) Mode() WorkMode {
@@ -332,7 +332,7 @@ forloop:
 
 			r.Unlock()
 
-		case recvMsg := <-r.ins.Recv():
+		case recvMsg := <-r.transport.Recv():
 			//LogList.Printf("%s received msg: %+v", r, msg)
 			r.Lock()
 			r.handleMsg(recvMsg.SenderID, recvMsg.Message)
@@ -384,7 +384,7 @@ func (r *Raft) handleRequestVote(msg *RequestVoteMessage) {
 		Term:        r.currentTerm,
 		voteGranted: grantVote,
 	}
-	r.ins.Send(msg.candidateId, ackMsg)
+	r.transport.Send(msg.candidateId, ackMsg)
 }
 
 func (r *Raft) _handleRequestVote(msg *RequestVoteMessage) bool {
@@ -477,7 +477,7 @@ func (r *Raft) handleAppendEntriesACK(senderID int, msg *AppendEntriesACKMessage
 func (r *Raft) handleAppendEntries(msg *AppendEntriesMessage) {
 	success, lastLogIndex := r.handleAppendEntriesImpl(msg)
 
-	r.ins.Send(msg.leaderID, &AppendEntriesACKMessage{
+	r.transport.Send(msg.leaderID, &AppendEntriesACKMessage{
 		Term:         r.currentTerm,
 		success:      success,
 		lastLogIndex: lastLogIndex,
@@ -545,7 +545,7 @@ func (r *Raft) handleInstallSnapshotMessage(msg *InstallSnapshotMessage) {
 
 	// reply to leader no matter install success or failed
 	//r.Logger.Errorf("Sending InstallSnapshotACKMessage to Leader %v", msg.leaderID)
-	r.ins.Send(msg.leaderID, &InstallSnapshotACKMessage{
+	r.transport.Send(msg.leaderID, &InstallSnapshotACKMessage{
 		Term:         r.currentTerm,
 		success:      success,
 		lastLogIndex: lastSnapshotLogIndex,
@@ -697,7 +697,7 @@ func (r *Raft) sendRequestVote() {
 		lastLogIndex: r.LogList.LastIndex(),
 		lastLogTerm:  r.LogList.LastTerm(),
 	}
-	r.ins.Broadcast(msg)
+	r.transport.Broadcast(msg)
 }
 
 func (r *Raft) assureInMode(mode WorkMode) {
@@ -784,7 +784,7 @@ func (r *Raft) broadcastAppendEntries() {
 				leaderCommit: r.CommitIndex,
 				entries:      entries,
 			}
-			r.ins.Send(insID, msg)
+			r.transport.Send(insID, msg)
 		} else {
 			// this follower is too far behind to append entries, we need install snapshot to it
 			assert.True(r.Logger, r.LogList.Snapshot != nil)
@@ -794,7 +794,7 @@ func (r *Raft) broadcastAppendEntries() {
 				leaderID: r.ID(),
 				Snapshot: snapshot,
 			}
-			r.ins.Send(insID, msg)
+			r.transport.Send(insID, msg)
 		}
 	}
 }
