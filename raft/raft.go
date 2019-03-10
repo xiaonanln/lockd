@@ -470,7 +470,7 @@ func (r *Raft) handleAppendEntriesACK(senderID int, msg *AppendEntriesACKMessage
 		} else {
 			r.nextIndex[senderID] = 1
 		}
-		r.Logger.Infof("%s.handleAppendEntriesACK failed: nextIndex[%v] <== %v, step = %v", r, senderID, r.nextIndex[senderID], step)
+		//r.Logger.Infof("%s.handleAppendEntriesACK failed: nextIndex[%v] <== %v, step = %v", r, senderID, r.nextIndex[senderID], step)
 		r.nextIndexSearchStep[senderID] *= 2
 	}
 }

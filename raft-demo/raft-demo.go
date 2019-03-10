@@ -132,6 +132,7 @@ func newTimePeriod() *TimePeriod {
 		if rand.Float64() < brokenProb {
 			// this instance should be broken
 			tp.instanceHealthy[i] = newInstanceBroken()
+			brokenNum -= 1
 		} else {
 			// this instance should be healthy
 			tp.instanceHealthy[i] = InstanceFine
