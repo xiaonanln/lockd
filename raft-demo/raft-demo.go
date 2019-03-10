@@ -65,7 +65,7 @@ func main() {
 		}
 		r.Unlock()
 
-		time.Sleep(time.Microsecond * 1000)
+		time.Sleep(time.Microsecond * 100)
 		verifyCounter += 1
 		if verifyCounter%1000 == 0 {
 			verifyCorrectness(raftInstances)
@@ -107,6 +107,8 @@ func (tp *TimePeriod) isTimeout() bool {
 	return time.Now().After(tp.startTime.Add(tp.duration))
 }
 
+var lastLeaderCommitIndex = raft.InvalidLogIndex
+
 func verifyCorrectness(instances []*demo.DemoRaftInstance) {
 	// verify the correctness of Raft algorithm
 	// lock all Raft instances before
@@ -147,6 +149,8 @@ func verifyCorrectness(instances []*demo.DemoRaftInstance) {
 	}
 
 	leaderCommitIndex := leader.CommitIndex
+	assert.GreaterOrEqual(leader.Logger, leaderCommitIndex, lastLeaderCommitIndex) // commit index should only grow
+
 	isAllAppliedLogIndexSame := true    // determine if all rafts has same LastAppliedIndex
 	minLogIndex := raft.InvalidLogIndex // to find the first log logIndex that <= leader.CommitIndex and exists on all raft instances
 	// other raft instances should not have larger commit logIndex
@@ -190,10 +194,25 @@ func verifyCorrectness(instances []*demo.DemoRaftInstance) {
 }
 
 func findLeader() *raft.Raft {
+	leaders := []int{}
 	for i := 0; i < INSTANCE_NUM; i++ {
 		if raftInstances[i].Raft.Mode() == raft.Leader {
-			return raftInstances[i].Raft
+			leaders = append(leaders, i)
 		}
 	}
-	return nil // no leader, this can happen in this
+
+	if len(leaders) == 1 {
+		return raftInstances[leaders[0]].Raft
+	} else if len(leaders) == 0 {
+		return nil
+	} else {
+		// found multiple leaders, use the one with highest commited index as the real leader
+		bestLeader := leaders[0]
+		for i := 1; i < len(leaders); i++ {
+			if raftInstances[leaders[i]].Raft.CommitIndex > raftInstances[bestLeader].Raft.CommitIndex {
+				bestLeader = leaders[i]
+			}
+		}
+		return raftInstances[bestLeader].Raft
+	}
 }

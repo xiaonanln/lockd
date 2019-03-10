@@ -58,7 +58,9 @@ func (ins *DemoRaftInstance) Send(insID int, msg raft.RPCMessage) {
 	}
 
 	instancesLock.RLock()
-	instances[insID].recvChan <- raft.RecvRPCMessage{ins.ID(), msg.Copy()}
+	if !instances[insID].IsBroken.Load() {
+		instances[insID].recvChan <- raft.RecvRPCMessage{ins.ID(), msg.Copy()}
+	}
 	instancesLock.RUnlock()
 }
 
@@ -75,8 +77,9 @@ func (ins *DemoRaftInstance) Broadcast(msg raft.RPCMessage) {
 		if other == ins {
 			continue
 		}
-
-		other.recvChan <- raft.RecvRPCMessage{ins.ID(), msg.Copy()}
+		if !other.IsBroken.Load() {
+			other.recvChan <- raft.RecvRPCMessage{ins.ID(), msg.Copy()}
+		}
 	}
 }
 

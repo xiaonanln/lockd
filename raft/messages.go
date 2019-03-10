@@ -103,7 +103,10 @@ func (msg *InstallSnapshotMessage) Copy() RPCMessage {
 }
 
 type InstallSnapshotACKMessage struct {
-	Term Term
+	Term    Term
+	success bool
+	// last LogList Index of the AppendEntries message when success, equals to prevLogIndex if entries is empty
+	lastLogIndex LogIndex
 }
 
 func (msg *InstallSnapshotACKMessage) GetTerm() Term {

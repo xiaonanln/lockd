@@ -156,7 +156,7 @@ func (ll *LogList) LogIndexToIndex(index LogIndex) int {
 func (ll *LogList) LocateLog(term Term, index LogIndex) (bool, int) {
 	idx := ll.LogIndexToIndex(index)
 	if idx < 0 {
-		// the log is already applied, term must match because all applied logs are committed
+		// the log is already in snapshot, term must match because all snapshot are committed
 		return true, idx
 	}
 
@@ -193,7 +193,7 @@ func (ll *LogList) SetSnapshot(snapshot *Snapshot) bool {
 
 	if ll.Snapshot != nil && ll.Snapshot.LastIndex >= snapshot.LastIndex {
 		// no need to install it because my snapshot is even newer
-		defaultSugaredLogger.Infof("set snapshot ignored: LastIndex=%d, existing snapshot.LastIndex=%d", snapshot.LastIndex, ll.Snapshot.LastIndex)
+		//defaultSugaredLogger.Infof("set snapshot ignored: LastIndex=%d, existing snapshot.LastIndex=%d", snapshot.LastIndex, ll.Snapshot.LastIndex)
 		return false
 	}
 
@@ -247,7 +247,8 @@ type Raft struct {
 	// leader mode fields
 	lastAppendEntriesRPCTime time.Time
 	// for each server, Index of the next LogList entry to send to that server (initialized to leader last LogList Index + 1)
-	nextIndex []LogIndex
+	nextIndex           []LogIndex
+	nextIndexSearchStep []LogIndex
 	// for each server, Index of highest LogList entry known to be replicated on server (initialized to 0, increases monotonically)
 	matchIndex []LogIndex
 
@@ -272,10 +273,10 @@ func NewRaft(ctx context.Context, instanceNum int, ins NetworkDevice, ss StateMa
 		mode:                     Follower,
 		resetElectionTimeoutTime: time.Now(),
 		// init raft states
-		currentTerm:      0,
+		currentTerm:      InvalidTerm,
 		votedFor:         -1,
 		LogList:          LogList{},
-		CommitIndex:      0,
+		CommitIndex:      InvalidLogIndex,
 		LastAppliedIndex: 0,
 		Logger:           defaultSugaredLogger,
 	}
@@ -366,7 +367,7 @@ func (r *Raft) handleMsg(senderID int, _msg RPCMessage) {
 	case *InstallSnapshotMessage:
 		r.handleInstallSnapshotMessage(msg)
 	case *InstallSnapshotACKMessage:
-		r.handleInstallSnapshotACKMessage(msg)
+		r.handleInstallSnapshotACKMessage(senderID, msg)
 	default:
 		log.Fatalf("unexpected message type: %T", _msg)
 	}
@@ -416,6 +417,27 @@ func (r *Raft) handleRequestVoteACKMessage(msg *RequestVoteACKMessage) {
 	}
 }
 
+func (r *Raft) handleInstallSnapshotACKMessage(senderID int, msg *InstallSnapshotACKMessage) {
+	// nothing todo here
+	if r.mode != Leader {
+		return
+	}
+
+	if msg.Term < r.currentTerm {
+		return
+	}
+
+	if msg.success {
+		r.nextIndex[senderID] = msg.lastLogIndex + 1
+		if msg.lastLogIndex > r.matchIndex[senderID] {
+			r.matchIndex[senderID] = msg.lastLogIndex
+		}
+		r.nextIndexSearchStep[senderID] = 1 // reset search step to 1 when AppendEntriesRPC succeed
+	} else {
+		// Install Snapshot Failed, can do nothing here.
+	}
+}
+
 func (r *Raft) handleAppendEntriesACK(senderID int, msg *AppendEntriesACKMessage) {
 	if r.mode != Leader {
 		// not leader anymore..
@@ -435,12 +457,20 @@ func (r *Raft) handleAppendEntriesACK(senderID int, msg *AppendEntriesACKMessage
 		if msg.lastLogIndex > r.matchIndex[senderID] {
 			r.matchIndex[senderID] = msg.lastLogIndex
 		}
+		r.nextIndexSearchStep[senderID] = 1 // reset search step to 1 when AppendEntriesRPC succeed
+
+		//r.Logger.Infof("%s.handleAppendEntriesACK success: nextIndex[%v] <== %v", r, senderID, r.nextIndex[senderID])
 	} else {
 		// AppendEntries fail
 		// decrement nextIndex, but nextIndex should be at least 1
-		if r.nextIndex[senderID] > 1 {
-			r.nextIndex[senderID] -= 1
+		step := r.nextIndexSearchStep[senderID]
+		if r.nextIndex[senderID]-step > 0 {
+			r.nextIndex[senderID] -= step
+		} else {
+			r.nextIndex[senderID] = 1
 		}
+		r.Logger.Infof("%s.handleAppendEntriesACK failed: nextIndex[%v] <== %v, step = %v", r, senderID, r.nextIndex[senderID], step)
+		r.nextIndexSearchStep[senderID] *= 2
 	}
 }
 
@@ -511,18 +541,19 @@ func (r *Raft) handleAppendEntriesImpl(msg *AppendEntriesMessage) (bool, LogInde
 
 func (r *Raft) handleInstallSnapshotMessage(msg *InstallSnapshotMessage) {
 	// todo: install snapshot
-	if r.handleInstallSnapshotRPCMessageImpl(msg) {
-	}
+	success, lastSnapshotLogIndex := r.handleInstallSnapshotRPCMessageImpl(msg)
 
 	// reply to leader no matter install success or failed
-	r.Logger.Errorf("Sending InstallSnapshotACKMessage to Leader %v", msg.leaderID)
+	//r.Logger.Errorf("Sending InstallSnapshotACKMessage to Leader %v", msg.leaderID)
 	r.ins.Send(msg.leaderID, &InstallSnapshotACKMessage{
-		Term: r.currentTerm,
+		Term:         r.currentTerm,
+		success:      success,
+		lastLogIndex: lastSnapshotLogIndex,
 	})
 }
-func (r *Raft) handleInstallSnapshotRPCMessageImpl(msg *InstallSnapshotMessage) bool {
+func (r *Raft) handleInstallSnapshotRPCMessageImpl(msg *InstallSnapshotMessage) (bool, LogIndex) {
 	if msg.Term < r.currentTerm {
-		return false
+		return false, InvalidLogIndex
 	}
 
 	assert.True(r.Logger, r.mode != Leader)
@@ -542,8 +573,8 @@ func (r *Raft) handleInstallSnapshotRPCMessageImpl(msg *InstallSnapshotMessage) 
 	// the received snapshot is newer than our's
 	// install the snapshot to the LogList and discard log up to snapshot's last term#index
 	if !r.LogList.SetSnapshot(recvSnapshot) {
-		r.Logger.Infof("%s ignored snapshot %s, because local snapshot is #%d", r, recvSnapshot, r.LogList.SnapshotLastIndex())
-		return false
+		//r.Logger.Infof("%s ignored snapshot %s, because local snapshot is #%d", r, recvSnapshot, r.LogList.SnapshotLastIndex())
+		return true, r.LogList.SnapshotLastIndex()
 	}
 
 	// Snapshot from leader implies that leader's commitIndex >= snapshot.LastIndex
@@ -560,13 +591,9 @@ func (r *Raft) handleInstallSnapshotRPCMessageImpl(msg *InstallSnapshotMessage) 
 	r.LastAppliedTerm = recvSnapshot.LastTerm
 	r.LastAppliedIndex = recvSnapshot.LastIndex
 
-	r.Logger.Infof("%s installed received snapshot %s, local log is %s", r, recvSnapshot, &r.LogList)
+	//r.Logger.Infof("%s installed received snapshot %s, local log is %s", r, recvSnapshot, &r.LogList)
 
-	return true
-}
-
-func (r *Raft) handleInstallSnapshotACKMessage(message *InstallSnapshotACKMessage) {
-
+	return true, r.LogList.SnapshotLastIndex()
 }
 
 // isLogUpToDate determines if the LogList of specified Term and Index is at least as up-to-date as r.LogList
@@ -598,7 +625,7 @@ func (r *Raft) candidateTick() {
 	now := time.Now()
 
 	if now.Sub(r.resetElectionTimeoutTime) > electionTimeout {
-		log.Printf("%s: election timeout in candidate mode, restarting election ...", r)
+		//log.Printf("%s: election timeout in candidate mode, restarting election ...", r)
 		r.prepareElection()
 		return
 	}
@@ -632,11 +659,11 @@ func (r *Raft) resetElectionTimeout() {
 func (r *Raft) prepareElection() {
 	r.assureInMode(Candidate)
 
-	log.Printf("%s prepare election in term %d...", r, r.currentTerm)
+	//log.Printf("%s prepare election in term %d...", r, r.currentTerm)
 	r.startElectionTime = time.Now().Add(time.Duration(rand.Int63n(int64(maxStartElectionDelay))))
 	r.electionStarted = false
 	r.resetElectionTimeout()
-	log.Printf("%s set start election time = %s", r, r.startElectionTime)
+	//log.Printf("%s set start election time = %s", r, r.startElectionTime)
 }
 
 func (r *Raft) startElection() {
@@ -650,7 +677,7 @@ func (r *Raft) startElection() {
 	//?Vote for self
 	//?Reset election timer
 	//?Send RequestVote RPCs to all other servers
-	log.Printf("%s start election ...", r)
+	//log.Printf("%s start election ...", r)
 	r.newTerm(r.currentTerm + 1)
 	r.electionStarted = true
 	r.votedFor = r.ID()    // vote for self
@@ -719,9 +746,12 @@ func (r *Raft) enterLeaderMode() {
 	log.Printf("NEW LEADER ELECTED: %d, term=%v, granted=%d, quorum=%d !!!", r.ID(), r.currentTerm, r.voteGrantedCount, r.instanceNum)
 	r.lastAppendEntriesRPCTime = time.Time{}
 	r.nextIndex = make([]LogIndex, r.instanceNum)
+	r.nextIndexSearchStep = make([]LogIndex, r.instanceNum)
 	for i := range r.nextIndex {
 		r.nextIndex[i] = r.LogList.LastIndex() + 1
+		r.nextIndexSearchStep[i] = 1
 	}
+
 	r.matchIndex = make([]LogIndex, r.instanceNum)
 }
 
@@ -732,11 +762,19 @@ func (r *Raft) broadcastAppendEntries() {
 			continue
 		}
 
-		nextLogIndex := r.nextIndex[insID] // next Index for the instance to receive
+		nextLogIndex := r.nextIndex[insID]   // next Index for the instance to receive
+		matchLogIndex := r.matchIndex[insID] // matched log index for this instance
 		ok, prevLogTerm, prevLogIndex := r.LogList.FindLogBefore(nextLogIndex)
 		if ok {
-			entries := r.LogList.GetEntries(nextLogIndex)
-			r.verifyAppendEntriesSound(entries)
+			var entries []*Log
+			//r.Logger.Infof("%s => %s nextLogIndex = %v, matchLogIndex=%v", r, insID, nextLogIndex, matchLogIndex)
+			if nextLogIndex > matchLogIndex+1 {
+				// next log index is too big, send empty entries for discovering nextLogIndex
+				entries = []*Log{}
+			} else {
+				entries = r.LogList.GetEntries(nextLogIndex)
+				r.verifyAppendEntriesSound(entries)
+			}
 
 			msg := &AppendEntriesMessage{
 				Term:         r.currentTerm,
@@ -813,7 +851,7 @@ func (r *Raft) tryApplyCommitedLogs() {
 }
 
 func (r *Raft) tryCompactLog() error {
-	if r.LastAppliedIndex > r.LogList.SnapshotLastIndex() {
+	if r.LastAppliedIndex >= r.LogList.SnapshotLastIndex()+100 {
 		buf := bytes.NewBuffer([]byte{})
 		//TODO: take snapshot in another goroutine
 		err := r.ss.Snapshot(buf)
