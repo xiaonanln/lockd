@@ -17,7 +17,7 @@ var (
 )
 
 const (
-	INSTANCE_NUM = 3
+	INSTANCE_NUM = 5
 
 	PERIOD_DURATION = time.Second * 10
 )
