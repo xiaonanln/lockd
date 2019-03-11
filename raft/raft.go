@@ -335,6 +335,7 @@ forloop:
 
 		case recvMsg := <-r.transport.Recv():
 			//LogList.Printf("%s received msg: %+v", r, msg)
+			assert.NotEqual(r.Logger, r.ID(), recvMsg.SenderID)
 			r.Lock()
 			r.handleMsg(recvMsg.SenderID, recvMsg.Message)
 			r.Unlock()
@@ -391,6 +392,7 @@ func (r *Raft) handleRequestVote(msg *RequestVoteMessage) {
 func (r *Raft) _handleRequestVote(msg *RequestVoteMessage) bool {
 	//1. Reply false if Term < currentTerm (§5.1)
 	//2. If votedFor is null or candidateId, and candidate’s LogList is at least as up-to-date as receiver’s LogList, grant vote (§5.2, §5.4)
+	assert.NotEqual(r.Logger, r.ID(), msg.candidateId)
 
 	if msg.Term < r.currentTerm {
 		return false
