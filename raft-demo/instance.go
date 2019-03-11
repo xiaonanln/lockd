@@ -10,6 +10,8 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/xiaonanln/go-xnsyncutil/xnsyncutil"
 
 	"github.com/xiaonanln/lockd/raft"
@@ -78,6 +80,7 @@ func (ins *DemoRaftInstance) Send(insID int, msg raft.RPCMessage) {
 
 	dstInstance := getInstance(insID)
 	dstH := dstInstance.GetHealthy()
+	assert.True(demoLogger, dstInstance != ins)
 	if !dstH.CanRecv() {
 		return
 	}
