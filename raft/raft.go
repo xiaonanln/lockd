@@ -318,7 +318,6 @@ func (r *Raft) Input(data LogData) (term Term, index LogIndex) {
 func (r *Raft) routine() {
 	ticker := time.NewTicker(time.Millisecond * 10)
 	defer ticker.Stop()
-	log.Printf("%s start running ...", r)
 
 forloop:
 	for {
@@ -352,8 +351,6 @@ forloop:
 			break forloop
 		}
 	}
-
-	log.Printf("%s is shutdown", r)
 }
 
 func (r *Raft) handleMsg(senderID int, _msg RPCMessage) {
