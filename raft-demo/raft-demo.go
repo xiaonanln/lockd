@@ -244,7 +244,7 @@ func verifyCorrectness(instances []*DemoRaftInstance) {
 		for i := 0; i < INSTANCE_NUM-1; i++ {
 			assert.True(assertLogger, instances[i].StateMachineEquals(instances[i+1]))
 		}
-		demoLogger.Infof("CONGRATUATIONS! ALL REPLICATED STATE MACHINES ARE CONSISTENT.")
+		demoLogger.Infof("CONGRATULATIONS! ALL REPLICATED STATE MACHINES ARE CONSISTENT.")
 	}
 
 	log.Printf("Verify correctness ok: leader's commit logIndex = %v, check entries range: %v ~ %v", leaderCommitIndex, minLogIndex, leaderCommitIndex)
