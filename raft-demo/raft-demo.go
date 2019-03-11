@@ -103,9 +103,9 @@ func main() {
 		}
 		r.Unlock()
 
-		time.Sleep(time.Microsecond * 100)
+		time.Sleep(time.Microsecond * 10)
 		verifyCounter += 1
-		if verifyCounter%1000 == 0 {
+		if verifyCounter%10000 == 0 {
 			verifyCorrectness(raftInstances)
 		}
 
