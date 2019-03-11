@@ -317,6 +317,7 @@ func (r *Raft) Input(data LogData) (term Term, index LogIndex) {
 
 func (r *Raft) routine() {
 	ticker := time.NewTicker(time.Millisecond * 10)
+	// TODO: make the logic tick interval free, and set smaller interval (1ms)
 	defer ticker.Stop()
 
 forloop:
