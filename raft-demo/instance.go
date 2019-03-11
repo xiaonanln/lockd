@@ -39,6 +39,8 @@ func NewDemoRaftInstance(ctx context.Context, id int) *DemoRaftInstance {
 		id:       id,
 		recvChan: make(chan raft.RecvRPCMessage, 1000),
 	}
+	ins.Raft = raft.NewRaft(ctx, INSTANCE_NUM, ins, ins)
+	ins.healthy.Store(unsafe.Pointer(&InstanceHealthyPerfect)) // all instances area perfectly healthy when started
 
 	instancesLock.Lock()
 	instances[id] = ins
@@ -69,6 +71,11 @@ func (ins *DemoRaftInstance) ID() int {
 	return ins.id
 }
 
+func (ins *DemoRaftInstance) Recover() {
+	ins.Raft.Shutdown() // duplicate Shutdown, but should be fine
+	ins.Raft = raft.NewRaft(ins.ctx, INSTANCE_NUM, ins, ins)
+}
+
 func (ins *DemoRaftInstance) Crash() {
 	// clear all messages in recvChan
 	ins.Raft.Lock()
@@ -85,8 +92,6 @@ clearloop:
 	ins.sumAllNumbers = 0
 	ins.Raft.Shutdown()
 	ins.Raft.Unlock()
-
-	ins.Raft = raft.NewRaft(ins.ctx, INSTANCE_NUM, ins, ins)
 }
 
 func (ins *DemoRaftInstance) Recv() <-chan raft.RecvRPCMessage {
@@ -161,10 +166,18 @@ func (ins *DemoRaftInstance) StateMachineEquals(other *DemoRaftInstance) bool {
 }
 
 func (ins *DemoRaftInstance) SetHealthy(healthy *InstanceHealthy) {
+	previousHealthy := ins.GetHealthy()
+
 	ins.healthy.Store(unsafe.Pointer(healthy))
+
+	if !previousHealthy.Crash && healthy.Crash {
+		ins.Crash()
+	} else if previousHealthy.Crash && !healthy.Crash {
+		ins.Recover()
+	}
+
 	if healthy.Crash {
 		demoLogger.Warnf("%s CRASHED!", ins)
-		ins.Crash()
 	} else if healthy.NetworkDown {
 		demoLogger.Warnf("%s NETWORK DOWN!", ins)
 	} else {

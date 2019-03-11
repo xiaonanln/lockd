@@ -84,7 +84,6 @@ func main() {
 	for i := 0; i < INSTANCE_NUM; i++ {
 		ins := NewDemoRaftInstance(ctx, i)
 		raftInstances = append(raftInstances, ins)
-		ins.Raft = raft.NewRaft(ctx, INSTANCE_NUM, ins, ins)
 	}
 
 	verifyCounter := 0
