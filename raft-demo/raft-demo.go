@@ -206,7 +206,6 @@ func verifyCorrectness(instances []*DemoRaftInstance) {
 		// In this case, the new leader has less CommitIndex, but it must contains logs to previous leader's CommitIndex
 		assert.GreaterOrEqual(demoLogger, leader.LogList.LastIndex(), lastLeaderCommitIndex)
 	}
-	assert.GreaterOrEqual(leader.Logger, leaderCommitIndex, lastLeaderCommitIndex) // commit index should only grow
 	lastLeaderCommitIndex = leaderCommitIndex
 
 	isAllAppliedLogIndexSame := true    // determine if all rafts has same LastAppliedIndex
