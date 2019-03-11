@@ -1,0 +1,6 @@
+package main
+
+const (
+	NORMAL_MESSAGE_DROP_RATE_MIN = 0
+	NORMAL_MESSAGE_DROP_RATE_MAX = 0.1
+)

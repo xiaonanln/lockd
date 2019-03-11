@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math/rand"
 	"strconv"
 	"sync"
 	"time"
@@ -94,6 +95,11 @@ func (ins *DemoRaftInstance) Send(insID int, msg raft.RPCMessage) {
 	h := ins.GetHealthy()
 
 	if !h.CanSend() {
+		return
+	}
+
+	if rand.Float32() < h.MessageDropRate {
+		// can send message, but message is dropped
 		return
 	}
 

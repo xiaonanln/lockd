@@ -28,27 +28,34 @@ type TimePeriod struct {
 }
 
 type InstanceHealthy struct {
-	Crash       bool
-	NetworkDown bool
-	SendDelay   time.Duration
-	RecvDelay   time.Duration
+	Crash           bool
+	NetworkDown     bool
+	SendDelay       time.Duration
+	RecvDelay       time.Duration
+	MessageDropRate float32 // probability of message being dropped when sending
 }
 
-func newInstanceBroken() *InstanceHealthy {
-	healthy := *InstanceFine
+func newBrokenInstanceHealthy() *InstanceHealthy {
+	healthy := InstanceHealthyPerfect
 
 	if rand.Float32() < 0.5 {
 		healthy.Crash = true
 		return &healthy
 	}
 
-	if rand.Float32() < 0.8 {
+	if rand.Float32() < 0.5 {
 		healthy.NetworkDown = true
 		return &healthy
 	}
 
-	healthy.SendDelay = time.Millisecond * time.Duration(rand.Intn(500))
-	healthy.RecvDelay = time.Millisecond * time.Duration(rand.Intn(500))
+	// not crash, not network total down, but has very high message drop rate
+	healthy.MessageDropRate = 0.8
+	return &healthy
+}
+
+func newNormalInstanceHealthy() *InstanceHealthy {
+	healthy := InstanceHealthyPerfect
+	healthy.MessageDropRate = NORMAL_MESSAGE_DROP_RATE_MIN + (NORMAL_MESSAGE_DROP_RATE_MAX-NORMAL_MESSAGE_DROP_RATE_MIN)*rand.Float32()
 	return &healthy
 }
 
@@ -61,12 +68,13 @@ func (h *InstanceHealthy) CanRecv() bool {
 }
 
 var (
-	currentPeriod *TimePeriod = nil
-	InstanceFine              = &InstanceHealthy{
-		Crash:       false,
-		NetworkDown: false,
-		SendDelay:   0,
-		RecvDelay:   0,
+	currentPeriod          *TimePeriod = nil
+	InstanceHealthyPerfect             = InstanceHealthy{
+		Crash:           false,
+		NetworkDown:     false,
+		SendDelay:       0,
+		RecvDelay:       0,
+		MessageDropRate: 0,
 	}
 )
 
@@ -131,11 +139,11 @@ func newTimePeriod() *TimePeriod {
 		brokenProb := float64(brokenNum) / float64((INSTANCE_NUM - i))
 		if rand.Float64() < brokenProb {
 			// this instance should be broken
-			tp.instanceHealthy[i] = newInstanceBroken()
+			tp.instanceHealthy[i] = newBrokenInstanceHealthy()
 			brokenNum -= 1
 		} else {
 			// this instance should be healthy
-			tp.instanceHealthy[i] = InstanceFine
+			tp.instanceHealthy[i] = newNormalInstanceHealthy()
 		}
 	}
 	return tp
