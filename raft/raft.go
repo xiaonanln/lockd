@@ -347,7 +347,9 @@ forloop:
 			r.handleMsg(recvMsg.SenderID, recvMsg.Message)
 			r.Unlock()
 		case <-r.ctx.Done():
+			r.Lock()
 			log.Printf("%s stopped.", r)
+			r.Unlock()
 			break forloop
 		}
 	}
