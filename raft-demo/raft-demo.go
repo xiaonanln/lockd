@@ -204,7 +204,7 @@ func verifyCorrectness(instances []*DemoRaftInstance) {
 		// the current leader's CommitIndex is less than before (previous leader's CommitIndex)
 		// which is a normal case when new leader is elected
 		// In this case, the new leader has less CommitIndex, but it must contains logs to previous leader's CommitIndex
-		assert.GreaterOrEqual(demoLogger, leader.LogList.LastIndex(), lastLeaderCommitIndex)
+		assert.GreaterOrEqual(assertLogger, leader.LogList.LastIndex(), lastLeaderCommitIndex)
 	}
 	lastLeaderCommitIndex = leaderCommitIndex
 
@@ -213,7 +213,7 @@ func verifyCorrectness(instances []*DemoRaftInstance) {
 	// other raft instances should not have larger commit logIndex
 	for i := 0; i < INSTANCE_NUM; i++ {
 		r := raftInstances[i].Raft
-		//assert.LessOrEqual(r.Logger, r.CommitIndex, leaderCommitIndex) // not necessary so
+		//assert.LessOrEqual(demoLogger, r.CommitIndex, leaderCommitIndex) // not necessary so
 		if minLogIndex < r.LogList.SnapshotLastIndex()+1 {
 			minLogIndex = r.LogList.SnapshotLastIndex() + 1
 		}
@@ -225,7 +225,7 @@ func verifyCorrectness(instances []*DemoRaftInstance) {
 	// make sure all commited logs are exactly same
 	for logIndex := minLogIndex; logIndex <= leaderCommitIndex; logIndex++ {
 		leaderLog := leader.LogList.GetLog(logIndex)
-		assert.Equal(leader.Logger, logIndex, leaderLog.Index)
+		assert.Equal(assertLogger, logIndex, leaderLog.Index)
 		logTerm := leaderLog.Term
 		logData := leaderLog.Data
 
@@ -233,9 +233,9 @@ func verifyCorrectness(instances []*DemoRaftInstance) {
 			r := raftInstances[i].Raft
 			if r != leader && logIndex <= r.CommitIndex {
 				followerLog := r.LogList.GetLog(logIndex)
-				assert.Equal(r.Logger, logIndex, followerLog.Index)
-				assert.Equal(r.Logger, logTerm, followerLog.Term)
-				assert.Equal(r.Logger, logData, followerLog.Data)
+				assert.Equal(assertLogger, logIndex, followerLog.Index)
+				assert.Equal(assertLogger, logTerm, followerLog.Term)
+				assert.Equal(assertLogger, logData, followerLog.Data)
 			}
 		}
 	}
@@ -243,7 +243,7 @@ func verifyCorrectness(instances []*DemoRaftInstance) {
 	// make sure all state machines are consistent
 	if isAllAppliedLogIndexSame {
 		for i := 0; i < INSTANCE_NUM-1; i++ {
-			assert.True(leader.Logger, instances[i].StateMachineEquals(instances[i+1]))
+			assert.True(assertLogger, instances[i].StateMachineEquals(instances[i+1]))
 		}
 	}
 

@@ -254,8 +254,9 @@ type Raft struct {
 	// for each server, Index of highest LogList entry known to be replicated on server (initialized to 0, increases monotonically)
 	matchIndex []LogIndex
 
-	Logger   Logger
-	logInput chan []LogData
+	Logger       Logger
+	assertLogger assert.TestingT
+	logInput     chan []LogData
 }
 
 func NewRaft(ctx context.Context, instanceNum int, transport Transport, ss StateMachine) *Raft {
@@ -283,7 +284,9 @@ func NewRaft(ctx context.Context, instanceNum int, transport Transport, ss State
 		CommitIndex:      InvalidLogIndex,
 		LastAppliedIndex: 0,
 		Logger:           defaultSugaredLogger,
+		assertLogger:     MakeAssertLogger(defaultSugaredLogger),
 	}
+
 	go raft.routine()
 	return raft
 }
@@ -305,7 +308,7 @@ func (r *Raft) Mode() WorkMode {
 }
 
 func (r *Raft) Input(data LogData) (term Term, index LogIndex) {
-	assert.Truef(r.Logger, r.mode == Leader, "not leader")
+	assert.Truef(r.assertLogger, r.mode == Leader, "not leader")
 	term = r.CurrentTerm
 	newlog := r.LogList.Append(data, term)
 	index = newlog.Index
@@ -340,7 +343,7 @@ forloop:
 
 		case recvMsg := <-r.transport.Recv():
 			//LogList.Printf("%s received msg: %+v", r, msg)
-			assert.NotEqual(r.Logger, r.ID(), recvMsg.SenderID)
+			assert.NotEqual(r.assertLogger, r.ID(), recvMsg.SenderID)
 			r.Lock()
 			r.handleMsg(recvMsg.SenderID, recvMsg.Message)
 			r.Unlock()
@@ -399,7 +402,7 @@ func (r *Raft) handleRequestVote(msg *RequestVoteMessage) {
 func (r *Raft) _handleRequestVote(msg *RequestVoteMessage) bool {
 	//1. Reply false if Term < CurrentTerm (§5.1)
 	//2. If VotedFor is null or candidateId, and candidate’s LogList is at least as up-to-date as receiver’s LogList, grant vote (§5.2, §5.4)
-	assert.NotEqual(r.Logger, r.ID(), msg.candidateId)
+	assert.NotEqual(r.assertLogger, r.ID(), msg.candidateId)
 
 	if msg.Term < r.CurrentTerm {
 		return false
@@ -502,12 +505,12 @@ func (r *Raft) handleAppendEntriesImpl(msg *AppendEntriesMessage) (bool, LogInde
 		return false, 0
 	}
 
-	assert.True(r.Logger, r.mode != Leader)
+	assert.True(r.assertLogger, r.mode != Leader)
 
 	if r.mode == Candidate {
 		// candidate should convert to follower on AppendEntries RPC
 		// mst.Term should be equal to r.CurrentTerm for this moment
-		assert.Equal(r.Logger, msg.Term, r.CurrentTerm)
+		assert.Equal(r.assertLogger, msg.Term, r.CurrentTerm)
 		r.enterFollowerMode(msg.Term)
 	}
 
@@ -524,7 +527,7 @@ func (r *Raft) handleAppendEntriesImpl(msg *AppendEntriesMessage) (bool, LogInde
 	var lastLogIndex LogIndex
 	if len(msg.entries) > 0 {
 		//lastLogTerm = msg.entries[len(msg.entries)-1].Term
-		assert.NotNil(r.Logger, msg.entries[len(msg.entries)-1])
+		assert.NotNil(r.assertLogger, msg.entries[len(msg.entries)-1])
 		lastLogIndex = msg.entries[len(msg.entries)-1].Index
 	} else {
 		//lastLogTerm = msg.prevLogTerm
@@ -564,12 +567,12 @@ func (r *Raft) handleInstallSnapshotRPCMessageImpl(msg *InstallSnapshotMessage) 
 		return false, InvalidLogIndex
 	}
 
-	assert.True(r.Logger, r.mode != Leader)
+	assert.True(r.assertLogger, r.mode != Leader)
 
 	if r.mode == Candidate {
 		// candidate should convert to follower on InstallSnapshot RPC (I believe so because InstallSnapshot is another form of AppendEntries)
 		// mst.Term should be equal to r.CurrentTerm for this moment
-		assert.Equal(r.Logger, msg.Term, r.CurrentTerm)
+		assert.Equal(r.assertLogger, msg.Term, r.CurrentTerm)
 		r.enterFollowerMode(msg.Term)
 	}
 
@@ -595,7 +598,7 @@ func (r *Raft) handleInstallSnapshotRPCMessageImpl(msg *InstallSnapshotMessage) 
 	// install snapshot to the machine is as same as apply logs to the last term#index of the snapshot
 	ssrd := bytes.NewBuffer(recvSnapshot.Data)
 	err := r.ss.InstallSnapshot(ssrd)
-	assert.Nil(r.Logger, err)
+	assert.Nil(r.assertLogger, err)
 	r.LastAppliedTerm = recvSnapshot.LastTerm
 	r.LastAppliedIndex = recvSnapshot.LastIndex
 
@@ -717,7 +720,7 @@ func (r *Raft) assureInMode(mode WorkMode) {
 // enter follower mode with new GetTerm
 func (r *Raft) enterFollowerMode(term Term) {
 	log.Printf("%s change mode: %s ==> %s, new Term = %d", r, r.mode, Follower, term)
-	assert.GreaterOrEqual(r.Logger, term, r.CurrentTerm)
+	assert.GreaterOrEqual(r.assertLogger, term, r.CurrentTerm)
 
 	r.mode = Follower
 	if term > r.CurrentTerm {
@@ -795,7 +798,7 @@ func (r *Raft) broadcastAppendEntries() {
 			r.transport.Send(insID, msg)
 		} else {
 			// this follower is too far behind to append entries, we need install snapshot to it
-			assert.True(r.Logger, r.LogList.Snapshot != nil)
+			assert.True(r.assertLogger, r.LogList.Snapshot != nil)
 			snapshot := r.LogList.Snapshot
 			msg := &InstallSnapshotMessage{
 				Term:     r.CurrentTerm,
@@ -834,7 +837,7 @@ func (r *Raft) tryCommitLogs() {
 }
 
 func (r *Raft) tryApplyCommitedLogs() {
-	assert.LessOrEqual(r.Logger, uint64(r.LastAppliedIndex), uint64(r.CommitIndex))
+	assert.LessOrEqual(r.assertLogger, uint64(r.LastAppliedIndex), uint64(r.CommitIndex))
 	startApplyLogIndex := r.LastAppliedIndex + 1
 	stopApplyLogIndex := r.CommitIndex
 	if startApplyLogIndex >= stopApplyLogIndex {
@@ -846,11 +849,11 @@ func (r *Raft) tryApplyCommitedLogs() {
 		applyIdx := r.LogList.LogIndexToIndex(applyLogIndex)
 		// TODO: What if follower received a snapshot and installed to the log list, but failed to install it to the statemachine.
 		// TODO: In this case, the follower's LastAppliedIndex is smaller than the LastIndex of the snapshot, leading to applyIdx < 0
-		assert.GreaterOrEqual(r.Logger, applyIdx, 0)         // assert applyIdx >= 0 because applyIdx is not applied yet, so it is not removed yet
-		assert.Less(r.Logger, applyIdx, len(r.LogList.Logs)) // assert applyIdx is valid index, because applyLogIndex <= r.CommitIndex
+		assert.GreaterOrEqual(r.assertLogger, applyIdx, 0)         // assert applyIdx >= 0 because applyIdx is not applied yet, so it is not removed yet
+		assert.Less(r.assertLogger, applyIdx, len(r.LogList.Logs)) // assert applyIdx is valid index, because applyLogIndex <= r.CommitIndex
 		applyLog := r.LogList.Logs[applyIdx]
 		//r.Logger.Infof("%s APPLY %d#%d", r, applyLog.Term, applyLog.Index)
-		assert.Equal(r.Logger, applyLogIndex, applyLog.Index)
+		assert.Equal(r.assertLogger, applyLogIndex, applyLog.Index)
 
 		r.ss.ApplyLog(applyLog.Data)
 		r.LastAppliedIndex = applyLogIndex
@@ -881,8 +884,8 @@ func (r *Raft) VerifyCorrectness() {
 }
 
 func (r *Raft) verifyAppendEntriesSound(entries []*Log) {
-	//assert.NotNil(r.Logger, entries)
+	//assert.NotNil(r.assertLogger, entries)
 	for i := 0; i < len(entries); i++ {
-		assert.NotNil(r.Logger, entries[i])
+		assert.NotNil(r.assertLogger, entries[i])
 	}
 }

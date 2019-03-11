@@ -105,7 +105,7 @@ func (ins *DemoRaftInstance) Send(insID int, msg raft.RPCMessage) {
 
 	dstInstance := getInstance(insID)
 	dstH := dstInstance.GetHealthy()
-	assert.Truef(demoLogger, dstInstance != ins, "%s Send to %d,%s, msg=%#v", ins, insID, dstInstance, msg)
+	assert.Truef(assertLogger, dstInstance != ins, "%s Send to %d,%s, msg=%#v", ins, insID, dstInstance, msg)
 	if !dstH.CanRecv() {
 		return
 	}

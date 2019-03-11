@@ -2,6 +2,8 @@ package raft
 
 import (
 	"encoding/json"
+
+	"github.com/stretchr/testify/assert"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -33,4 +35,16 @@ func init() {
 
 	defaultLogger, err := defaultLogCfg.Build()
 	defaultSugaredLogger = defaultLogger.Sugar()
+}
+
+type assertLogger struct {
+	logger Logger
+}
+
+func (al assertLogger) Errorf(format string, args ...interface{}) {
+	al.logger.Fatalf(format, args...)
+}
+
+func MakeAssertLogger(logger Logger) assert.TestingT {
+	return assertLogger{logger}
 }

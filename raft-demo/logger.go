@@ -3,12 +3,17 @@ package main
 import (
 	"encoding/json"
 
+	"github.com/xiaonanln/lockd/raft"
+
+	"github.com/stretchr/testify/assert"
+
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
 
 var (
-	demoLogger *zap.SugaredLogger
+	demoLogger   *zap.SugaredLogger
+	assertLogger assert.TestingT
 )
 
 func init() {
@@ -32,4 +37,5 @@ func init() {
 
 	defaultLogger, err := logConfig.Build()
 	demoLogger = defaultLogger.Sugar()
+	assertLogger = raft.MakeAssertLogger(demoLogger)
 }
