@@ -73,6 +73,7 @@ func (ins *DemoRaftInstance) ID() int {
 
 func (ins *DemoRaftInstance) Recover() {
 	ins.Raft.Shutdown() // duplicate Shutdown, but should be fine
+	ins.sumAllNumbers = 0
 	ins.Raft = raft.NewRaft(ins.ctx, INSTANCE_NUM, ins, ins)
 }
 
@@ -89,7 +90,6 @@ clearloop:
 		}
 	}
 
-	ins.sumAllNumbers = 0
 	ins.Raft.Shutdown()
 	ins.Raft.Unlock()
 }
