@@ -47,8 +47,8 @@ func newInstanceBroken() *InstanceHealthy {
 		return &healthy
 	}
 
-	healthy.SendDelay = time.Millisecond * time.Duration(rand.Intn(2000))
-	healthy.RecvDelay = time.Millisecond * time.Duration(rand.Intn(2000))
+	healthy.SendDelay = time.Millisecond * time.Duration(rand.Intn(500))
+	healthy.RecvDelay = time.Millisecond * time.Duration(rand.Intn(500))
 	return &healthy
 }
 
