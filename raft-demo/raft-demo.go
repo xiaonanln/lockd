@@ -193,6 +193,7 @@ func verifyCorrectness(instances []*DemoRaftInstance) {
 
 	leaderCommitIndex := leader.CommitIndex
 	assert.GreaterOrEqual(leader.Logger, leaderCommitIndex, lastLeaderCommitIndex) // commit index should only grow
+	lastLeaderCommitIndex = leaderCommitIndex
 
 	isAllAppliedLogIndexSame := true    // determine if all rafts has same LastAppliedIndex
 	minLogIndex := raft.InvalidLogIndex // to find the first log logIndex that <= leader.CommitIndex and exists on all raft instances
