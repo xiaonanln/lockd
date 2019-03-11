@@ -222,6 +222,7 @@ type Raft struct {
 	transport   Transport
 	ss          StateMachine
 	ctx         context.Context
+	cancelFunc  context.CancelFunc
 	instanceNum int
 	mode        WorkMode
 
@@ -266,10 +267,12 @@ func NewRaft(ctx context.Context, instanceNum int, transport Transport, ss State
 		log.Fatalf("instance ID should be smaller than %d", instanceNum)
 	}
 
+	raftCtx, cancelFunc := context.WithCancel(ctx)
 	raft := &Raft{
 		transport:                transport,
 		ss:                       ss,
-		ctx:                      ctx,
+		ctx:                      raftCtx,
+		cancelFunc:               cancelFunc,
 		instanceNum:              instanceNum,
 		mode:                     Follower,
 		resetElectionTimeoutTime: time.Now(),
@@ -281,10 +284,12 @@ func NewRaft(ctx context.Context, instanceNum int, transport Transport, ss State
 		LastAppliedIndex: 0,
 		Logger:           defaultSugaredLogger,
 	}
-
 	go raft.routine()
-
 	return raft
+}
+
+func (r *Raft) Shutdown() {
+	r.cancelFunc()
 }
 
 func (r *Raft) ID() int {
@@ -344,6 +349,8 @@ forloop:
 			break forloop
 		}
 	}
+
+	log.Printf("%s is shutdown", r)
 }
 
 func (r *Raft) handleMsg(senderID int, _msg RPCMessage) {

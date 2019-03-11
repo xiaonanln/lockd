@@ -18,7 +18,7 @@ var (
 const (
 	INSTANCE_NUM = 3
 
-	PERIOD_DURATION = time.Second * 10
+	PERIOD_DURATION = time.Second * 3
 )
 
 type TimePeriod struct {
@@ -37,7 +37,7 @@ type InstanceHealthy struct {
 func newInstanceBroken() *InstanceHealthy {
 	healthy := *InstanceFine
 
-	if rand.Float32() < 0.3 {
+	if rand.Float32() < 0.5 {
 		healthy.Crash = true
 		return &healthy
 	}

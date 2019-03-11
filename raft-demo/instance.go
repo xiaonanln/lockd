@@ -68,6 +68,24 @@ func (ins *DemoRaftInstance) ID() int {
 	return ins.id
 }
 
+func (ins *DemoRaftInstance) Crash() {
+	// clear all messages in recvChan
+clearloop:
+	for {
+		select {
+		case <-ins.recvChan:
+			continue clearloop
+		default:
+			break clearloop
+		}
+	}
+
+	ins.sumAllNumbers = 0
+	ins.Raft.Shutdown()
+
+	ins.Raft = raft.NewRaft(ins.ctx, INSTANCE_NUM, ins, ins)
+}
+
 func (ins *DemoRaftInstance) Recv() <-chan raft.RecvRPCMessage {
 	return ins.recvChan
 }
@@ -138,6 +156,7 @@ func (ins *DemoRaftInstance) SetHealthy(healthy *InstanceHealthy) {
 	ins.healthy.Store(unsafe.Pointer(healthy))
 	if healthy.Crash {
 		demoLogger.Warnf("%s CRASHED!", ins)
+		ins.Crash()
 	} else if healthy.NetworkDown {
 		demoLogger.Warnf("%s NETWORK DOWN!", ins)
 	} else {
