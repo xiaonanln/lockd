@@ -51,11 +51,12 @@ func getInstance(id int) *DemoRaftInstance {
 	return instances[id]
 }
 
-func getAllInstances() (inss []*DemoRaftInstance) {
+func getAllInstances() (inss map[int]*DemoRaftInstance) {
 	instancesLock.RLock()
 	defer instancesLock.RUnlock()
-	for _, ins := range instances {
-		inss = append(inss, ins)
+	inss = map[int]*DemoRaftInstance{}
+	for id, ins := range instances {
+		inss[id] = ins
 	}
 	return
 }
