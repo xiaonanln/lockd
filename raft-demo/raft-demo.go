@@ -192,6 +192,12 @@ func verifyCorrectness(instances []*DemoRaftInstance) {
 	}
 
 	leaderCommitIndex := leader.CommitIndex
+	if leaderCommitIndex < lastLeaderCommitIndex {
+		// the current leader's CommitIndex is less than before (previous leader's CommitIndex)
+		// which is a normal case when new leader is elected
+		// In this case, the new leader has less CommitIndex, but it must contains logs to previous leader's CommitIndex
+		assert.GreaterOrEqual(demoLogger, leader.LogList.LastIndex(), lastLeaderCommitIndex)
+	}
 	assert.GreaterOrEqual(leader.Logger, leaderCommitIndex, lastLeaderCommitIndex) // commit index should only grow
 	lastLeaderCommitIndex = leaderCommitIndex
 
@@ -252,11 +258,28 @@ func findLeader() *raft.Raft {
 	} else {
 		// found multiple leaders, use the one with highest commited index as the real leader
 		bestLeader := leaders[0]
+		leaderR := raftInstances[bestLeader].Raft
 		for i := 1; i < len(leaders); i++ {
 			if raftInstances[leaders[i]].Raft.CommitIndex > raftInstances[bestLeader].Raft.CommitIndex {
 				bestLeader = leaders[i]
+				leaderR = raftInstances[bestLeader].Raft
 			}
 		}
-		return raftInstances[bestLeader].Raft
+
+		// make sure this leader is voted by majority of members
+		voteCount := 0
+		for i := 1; i < len(leaders); i++ {
+			r := raftInstances[leaders[i]].Raft
+			if r.CurrentTerm == leaderR.CurrentTerm && r.VotedFor == bestLeader {
+				voteCount += 1
+			}
+		}
+
+		if voteCount >= (INSTANCE_NUM/2)+1 {
+			// this is the real leader
+			return leaderR
+		} else {
+			return nil
+		}
 	}
 }

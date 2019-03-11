@@ -227,8 +227,8 @@ type Raft struct {
 	mode        WorkMode
 
 	// raft states
-	currentTerm Term
-	votedFor    int
+	CurrentTerm Term
+	VotedFor    int
 	LogList     LogList
 	// Index of highest LogList entry known to be committed (initialized to 0, increases monotonically)
 	CommitIndex LogIndex
@@ -277,8 +277,8 @@ func NewRaft(ctx context.Context, instanceNum int, transport Transport, ss State
 		mode:                     Follower,
 		resetElectionTimeoutTime: time.Now(),
 		// init raft states
-		currentTerm:      InvalidTerm,
-		votedFor:         -1,
+		CurrentTerm:      InvalidTerm,
+		VotedFor:         -1,
 		LogList:          LogList{},
 		CommitIndex:      InvalidLogIndex,
 		LastAppliedIndex: 0,
@@ -297,7 +297,7 @@ func (r *Raft) ID() int {
 }
 
 func (r *Raft) String() string {
-	return fmt.Sprintf("Raft<%d|%v|%d|%s|C%d|A%d>", r.transport.ID(), r.mode, r.currentTerm, &r.LogList, r.CommitIndex, r.LastAppliedIndex)
+	return fmt.Sprintf("Raft<%d|%v|%d|%s|C%d|A%d>", r.transport.ID(), r.mode, r.CurrentTerm, &r.LogList, r.CommitIndex, r.LastAppliedIndex)
 }
 
 func (r *Raft) Mode() WorkMode {
@@ -306,7 +306,7 @@ func (r *Raft) Mode() WorkMode {
 
 func (r *Raft) Input(data LogData) (term Term, index LogIndex) {
 	assert.Truef(r.Logger, r.mode == Leader, "not leader")
-	term = r.currentTerm
+	term = r.CurrentTerm
 	newlog := r.LogList.Append(data, term)
 	index = newlog.Index
 	return
@@ -355,11 +355,11 @@ forloop:
 
 func (r *Raft) handleMsg(senderID int, _msg RPCMessage) {
 	//All Servers:
-	//?If RPC request or response contains Term T > currentTerm:
-	//set currentTerm = T, convert to follower (?.1)
+	//?If RPC request or response contains Term T > CurrentTerm:
+	//set CurrentTerm = T, convert to follower (?.1)
 
 	msgTerm := _msg.GetTerm()
-	if r.currentTerm < msgTerm {
+	if r.CurrentTerm < msgTerm {
 		r.enterFollowerMode(msgTerm)
 	}
 
@@ -387,33 +387,33 @@ func (r *Raft) handleRequestVote(msg *RequestVoteMessage) {
 	log.Printf("%s grant vote %+v: %v", r, msg, grantVote)
 	// send grant vote ACK
 	// Results:
-	//GetTerm currentTerm, for candidate to update itself
+	//GetTerm CurrentTerm, for candidate to update itself
 	//voteGranted true means candidate received vote
 	ackMsg := &RequestVoteACKMessage{
-		Term:        r.currentTerm,
+		Term:        r.CurrentTerm,
 		voteGranted: grantVote,
 	}
 	r.transport.Send(msg.candidateId, ackMsg)
 }
 
 func (r *Raft) _handleRequestVote(msg *RequestVoteMessage) bool {
-	//1. Reply false if Term < currentTerm (§5.1)
-	//2. If votedFor is null or candidateId, and candidate’s LogList is at least as up-to-date as receiver’s LogList, grant vote (§5.2, §5.4)
+	//1. Reply false if Term < CurrentTerm (§5.1)
+	//2. If VotedFor is null or candidateId, and candidate’s LogList is at least as up-to-date as receiver’s LogList, grant vote (§5.2, §5.4)
 	assert.NotEqual(r.Logger, r.ID(), msg.candidateId)
 
-	if msg.Term < r.currentTerm {
+	if msg.Term < r.CurrentTerm {
 		return false
 	}
 
-	grantVote := (r.votedFor == -1 || r.votedFor == msg.candidateId) && r.isLogUpToDate(msg.lastLogTerm, msg.lastLogIndex)
+	grantVote := (r.VotedFor == -1 || r.VotedFor == msg.candidateId) && r.isLogUpToDate(msg.lastLogTerm, msg.lastLogIndex)
 	if grantVote {
-		r.votedFor = msg.candidateId
+		r.VotedFor = msg.candidateId
 	}
 	return grantVote
 }
 
 func (r *Raft) handleRequestVoteACKMessage(msg *RequestVoteACKMessage) {
-	if r.mode != Candidate || msg.Term != r.currentTerm {
+	if r.mode != Candidate || msg.Term != r.CurrentTerm {
 		// if not in candidate mode anymore, just ignore this packet
 		return
 	}
@@ -433,7 +433,7 @@ func (r *Raft) handleInstallSnapshotACKMessage(senderID int, msg *InstallSnapsho
 		return
 	}
 
-	if msg.Term < r.currentTerm {
+	if msg.Term < r.CurrentTerm {
 		return
 	}
 
@@ -454,14 +454,14 @@ func (r *Raft) handleAppendEntriesACK(senderID int, msg *AppendEntriesACKMessage
 		return
 	}
 
-	if msg.Term < r.currentTerm {
+	if msg.Term < r.CurrentTerm {
 		// Ack of previous term ... Meaning this leader was leader of msg.Term and now becomes the leader of current term
 		// Should ignore this RPC? This is a very very rare case and I think it is OK to ignore.
 		return
 	}
 
 	//r.Logger.Infof("%s.handleAppendEntriesACK: %v success=%v", r, senderID, msg.success)
-	// assert msg.GetTerm <= r.currentTerm
+	// assert msg.GetTerm <= r.CurrentTerm
 	if msg.success {
 		r.nextIndex[senderID] = msg.lastLogIndex + 1
 		if msg.lastLogIndex > r.matchIndex[senderID] {
@@ -488,7 +488,7 @@ func (r *Raft) handleAppendEntries(msg *AppendEntriesMessage) {
 	success, lastLogIndex := r.handleAppendEntriesImpl(msg)
 
 	r.transport.Send(msg.leaderID, &AppendEntriesACKMessage{
-		Term:         r.currentTerm,
+		Term:         r.CurrentTerm,
 		success:      success,
 		lastLogIndex: lastLogIndex,
 	})
@@ -496,9 +496,9 @@ func (r *Raft) handleAppendEntries(msg *AppendEntriesMessage) {
 }
 
 func (r *Raft) handleAppendEntriesImpl(msg *AppendEntriesMessage) (bool, LogIndex) {
-	//1. Reply false if Term < currentTerm (§5.1)
-	// If this is the leader, then msg.GetTerm < r.currentTerm should always be satisfied, because Raft assures that msg.GetTerm != r.currentTer
-	if msg.Term < r.currentTerm {
+	//1. Reply false if Term < CurrentTerm (§5.1)
+	// If this is the leader, then msg.GetTerm < r.CurrentTerm should always be satisfied, because Raft assures that msg.GetTerm != r.currentTer
+	if msg.Term < r.CurrentTerm {
 		return false, 0
 	}
 
@@ -506,8 +506,8 @@ func (r *Raft) handleAppendEntriesImpl(msg *AppendEntriesMessage) (bool, LogInde
 
 	if r.mode == Candidate {
 		// candidate should convert to follower on AppendEntries RPC
-		// mst.Term should be equal to r.currentTerm for this moment
-		assert.Equal(r.Logger, msg.Term, r.currentTerm)
+		// mst.Term should be equal to r.CurrentTerm for this moment
+		assert.Equal(r.Logger, msg.Term, r.CurrentTerm)
 		r.enterFollowerMode(msg.Term)
 	}
 
@@ -554,13 +554,13 @@ func (r *Raft) handleInstallSnapshotMessage(msg *InstallSnapshotMessage) {
 	// reply to leader no matter install success or failed
 	//r.Logger.Errorf("Sending InstallSnapshotACKMessage to Leader %v", msg.leaderID)
 	r.transport.Send(msg.leaderID, &InstallSnapshotACKMessage{
-		Term:         r.currentTerm,
+		Term:         r.CurrentTerm,
 		success:      success,
 		lastLogIndex: lastSnapshotLogIndex,
 	})
 }
 func (r *Raft) handleInstallSnapshotRPCMessageImpl(msg *InstallSnapshotMessage) (bool, LogIndex) {
-	if msg.Term < r.currentTerm {
+	if msg.Term < r.CurrentTerm {
 		return false, InvalidLogIndex
 	}
 
@@ -568,8 +568,8 @@ func (r *Raft) handleInstallSnapshotRPCMessageImpl(msg *InstallSnapshotMessage) 
 
 	if r.mode == Candidate {
 		// candidate should convert to follower on InstallSnapshot RPC (I believe so because InstallSnapshot is another form of AppendEntries)
-		// mst.Term should be equal to r.currentTerm for this moment
-		assert.Equal(r.Logger, msg.Term, r.currentTerm)
+		// mst.Term should be equal to r.CurrentTerm for this moment
+		assert.Equal(r.Logger, msg.Term, r.CurrentTerm)
 		r.enterFollowerMode(msg.Term)
 	}
 
@@ -667,7 +667,7 @@ func (r *Raft) resetElectionTimeout() {
 func (r *Raft) prepareElection() {
 	r.assureInMode(Candidate)
 
-	//log.Printf("%s prepare election in term %d...", r, r.currentTerm)
+	//log.Printf("%s prepare election in term %d...", r, r.CurrentTerm)
 	r.startElectionTime = time.Now().Add(time.Duration(rand.Int63n(int64(maxStartElectionDelay))))
 	r.electionStarted = false
 	r.resetElectionTimeout()
@@ -681,14 +681,14 @@ func (r *Raft) startElection() {
 		log.Panicf("election already started")
 	}
 	//On conversion to candidate, start election:
-	//?Increment currentTerm
+	//?Increment CurrentTerm
 	//?Vote for self
 	//?Reset election timer
 	//?Send RequestVote RPCs to all other servers
 	//log.Printf("%s start election ...", r)
-	r.newTerm(r.currentTerm + 1)
+	r.newTerm(r.CurrentTerm + 1)
 	r.electionStarted = true
-	r.votedFor = r.ID()    // vote for self
+	r.VotedFor = r.ID()    // vote for self
 	r.voteGrantedCount = 1 // vote for self in the beginning of election
 	r.sendRequestVote()
 }
@@ -700,7 +700,7 @@ func (r *Raft) sendRequestVote() {
 	//lastLogIndex Index of candidate’s last LogList entry (§5.4)
 	//lastLogTerm Term of candidate’s last LogList entry (§5.4)
 	msg := &RequestVoteMessage{
-		Term:         r.currentTerm,
+		Term:         r.CurrentTerm,
 		candidateId:  r.ID(),
 		lastLogIndex: r.LogList.LastIndex(),
 		lastLogTerm:  r.LogList.LastTerm(),
@@ -717,20 +717,20 @@ func (r *Raft) assureInMode(mode WorkMode) {
 // enter follower mode with new GetTerm
 func (r *Raft) enterFollowerMode(term Term) {
 	log.Printf("%s change mode: %s ==> %s, new Term = %d", r, r.mode, Follower, term)
-	assert.GreaterOrEqual(r.Logger, term, r.currentTerm)
+	assert.GreaterOrEqual(r.Logger, term, r.CurrentTerm)
 
 	r.mode = Follower
-	if term > r.currentTerm {
+	if term > r.CurrentTerm {
 		r.newTerm(term)
 	}
 }
 
 func (r *Raft) newTerm(term Term) {
-	if r.currentTerm >= term {
-		log.Fatalf("current Term is %d, can not enter follower mode with Term %d", r.currentTerm, term)
+	if r.CurrentTerm >= term {
+		log.Fatalf("current Term is %d, can not enter follower mode with Term %d", r.CurrentTerm, term)
 	}
-	r.currentTerm = term
-	r.votedFor = -1
+	r.CurrentTerm = term
+	r.VotedFor = -1
 	r.voteGrantedCount = 0
 }
 
@@ -751,7 +751,7 @@ func (r *Raft) enterLeaderMode() {
 
 	log.Printf("%s change mode: %s ==> %s", r, r.mode, Leader)
 	r.mode = Leader
-	log.Printf("NEW LEADER ELECTED: %d, term=%v, granted=%d, quorum=%d !!!", r.ID(), r.currentTerm, r.voteGrantedCount, r.instanceNum)
+	log.Printf("NEW LEADER ELECTED: %d, term=%v, granted=%d, quorum=%d !!!", r.ID(), r.CurrentTerm, r.voteGrantedCount, r.instanceNum)
 	r.lastAppendEntriesRPCTime = time.Time{}
 	r.nextIndex = make([]LogIndex, r.instanceNum)
 	r.nextIndexSearchStep = make([]LogIndex, r.instanceNum)
@@ -785,7 +785,7 @@ func (r *Raft) broadcastAppendEntries() {
 			}
 
 			msg := &AppendEntriesMessage{
-				Term:         r.currentTerm,
+				Term:         r.CurrentTerm,
 				leaderID:     r.ID(),
 				prevLogTerm:  prevLogTerm,
 				prevLogIndex: prevLogIndex,
@@ -798,7 +798,7 @@ func (r *Raft) broadcastAppendEntries() {
 			assert.True(r.Logger, r.LogList.Snapshot != nil)
 			snapshot := r.LogList.Snapshot
 			msg := &InstallSnapshotMessage{
-				Term:     r.currentTerm,
+				Term:     r.CurrentTerm,
 				leaderID: r.ID(),
 				Snapshot: snapshot,
 			}
@@ -809,15 +809,15 @@ func (r *Raft) broadcastAppendEntries() {
 
 func (r *Raft) tryCommitLogs() {
 	//If there exists an N such that N > CommitIndex, a majority
-	//of matchIndex[i] ≥ N, and LogList[N].GetTerm == currentTerm:
+	//of matchIndex[i] ≥ N, and LogList[N].GetTerm == CurrentTerm:
 	//set CommitIndex = N (§5.3, §5.4).
 	for idx := len(r.LogList.Logs) - 1; idx >= 0; idx-- {
 		_log := r.LogList.Logs[idx]
-		if _log.Index <= r.CommitIndex || _log.Term != r.currentTerm {
+		if _log.Index <= r.CommitIndex || _log.Term != r.CurrentTerm {
 			// nothing to commit
 			break
 		}
-		// _log.Index > r.CommitIndex && _log.GetTerm == r.currentTerm, check if we can commit this _log
+		// _log.Index > r.CommitIndex && _log.GetTerm == r.CurrentTerm, check if we can commit this _log
 		commitCount := 1
 		for id, matchIndx := range r.matchIndex {
 			if id != r.ID() && matchIndx >= _log.Index {
