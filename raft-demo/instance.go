@@ -71,6 +71,7 @@ func (ins *DemoRaftInstance) ID() int {
 
 func (ins *DemoRaftInstance) Crash() {
 	// clear all messages in recvChan
+	ins.Raft.Lock()
 clearloop:
 	for {
 		select {
@@ -83,6 +84,7 @@ clearloop:
 
 	ins.sumAllNumbers = 0
 	ins.Raft.Shutdown()
+	ins.Raft.Unlock()
 
 	ins.Raft = raft.NewRaft(ins.ctx, INSTANCE_NUM, ins, ins)
 }
