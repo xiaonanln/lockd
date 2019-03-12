@@ -46,7 +46,7 @@ func (runner *InstanceRunner) newDemoRaftInstance(id int) *DemoRaftInstance {
 		id:       id,
 		recvChan: make(chan raft.RecvRPCMessage, 1000),
 	}
-	ins.Raft = raft.NewRaft(ins.ctx, INSTANCE_NUM, ins, ins)
+	ins.Raft = raft.NewRaft(ins.ctx, ins.runner.quorum, ins, ins)
 	ins.healthy.Store(unsafe.Pointer(&InstanceHealthyPerfect)) // all instances area perfectly healthy when started
 
 	runner.instancesLock.Lock()
@@ -75,10 +75,10 @@ func (runner *InstanceRunner) Run() {
 	verifyCounter := 0
 	inputCounter := 0
 
-	runner.currentPeriod = newTimePeriod()
+	runner.currentPeriod = runner.newTimePeriod()
 	runner.applyTimePeriod()
 	for {
-		randInsIdx := rand.Intn(INSTANCE_NUM)
+		randInsIdx := rand.Intn(runner.quorum)
 		inputCounter = inputCounter + 1
 		inputData := strconv.Itoa(inputCounter)
 		r := runner.instances[randInsIdx].Raft
@@ -95,14 +95,14 @@ func (runner *InstanceRunner) Run() {
 		}
 
 		if runner.currentPeriod.isTimeout() {
-			runner.currentPeriod = newTimePeriod()
+			runner.currentPeriod = runner.newTimePeriod()
 			runner.applyTimePeriod()
 		}
 	}
 }
 
 func (runner *InstanceRunner) applyTimePeriod() {
-	for i := 0; i < INSTANCE_NUM; i++ {
+	for i := 0; i < runner.quorum; i++ {
 		ins := runner.instances[i]
 		ins.SetHealthy(runner.currentPeriod.instanceHealthy[i])
 	}
@@ -112,13 +112,13 @@ func (runner *InstanceRunner) verifyCorrectness() {
 	// verify the correctness of Raft algorithm
 	// lock all Raft instances before
 	lock := func() {
-		for i := 0; i < INSTANCE_NUM; i++ {
+		for i := 0; i < runner.quorum; i++ {
 			runner.instances[i].Raft.Lock()
 		}
 	}
 
 	unlock := func() {
-		for i := 0; i < INSTANCE_NUM; i++ {
+		for i := 0; i < runner.quorum; i++ {
 			runner.instances[i].Raft.Unlock()
 		}
 	}
@@ -128,7 +128,7 @@ func (runner *InstanceRunner) verifyCorrectness() {
 
 	leader := runner.findLeader()
 	followers := []*raft.Raft{}
-	for i := 0; i < INSTANCE_NUM; i++ {
+	for i := 0; i < runner.quorum; i++ {
 		r := runner.instances[i].Raft
 		r.VerifyCorrectness()
 		if r != leader {
@@ -159,7 +159,7 @@ func (runner *InstanceRunner) verifyCorrectness() {
 	isAllAppliedLogIndexSame := true    // determine if all rafts has same LastAppliedIndex
 	minLogIndex := raft.InvalidLogIndex // to find the first log logIndex that <= leader.CommitIndex and exists on all raft instances
 	// other raft instances should not have larger commit logIndex
-	for i := 0; i < INSTANCE_NUM; i++ {
+	for i := 0; i < runner.quorum; i++ {
 		r := runner.instances[i].Raft
 		//assert.LessOrEqual(demoLogger, r.CommitIndex, leaderCommitIndex) // not necessary so
 		if minLogIndex < r.LogList.SnapshotLastIndex()+1 {
@@ -177,7 +177,7 @@ func (runner *InstanceRunner) verifyCorrectness() {
 		logTerm := leaderLog.Term
 		logData := leaderLog.Data
 
-		for i := 0; i < INSTANCE_NUM; i++ {
+		for i := 0; i < runner.quorum; i++ {
 			r := runner.instances[i].Raft
 			if r != leader && logIndex <= r.CommitIndex {
 				followerLog := r.LogList.GetLog(logIndex)
@@ -190,7 +190,7 @@ func (runner *InstanceRunner) verifyCorrectness() {
 
 	// make sure all state machines are consistent
 	if isAllAppliedLogIndexSame {
-		for i := 0; i < INSTANCE_NUM-1; i++ {
+		for i := 0; i < runner.quorum-1; i++ {
 			assert.True(assertLogger, runner.instances[i].StateMachineEquals(runner.instances[i+1]))
 		}
 		demoLogger.Infof("CONGRATULATIONS! ALL REPLICATED STATE MACHINES ARE CONSISTENT.")
@@ -201,7 +201,7 @@ func (runner *InstanceRunner) verifyCorrectness() {
 
 func (runner *InstanceRunner) findLeader() *raft.Raft {
 	leaders := []int{}
-	for i := 0; i < INSTANCE_NUM; i++ {
+	for i := 0; i < runner.quorum; i++ {
 		if runner.instances[i].Raft.Mode() == raft.Leader {
 			leaders = append(leaders, i)
 		}
@@ -231,11 +231,34 @@ func (runner *InstanceRunner) findLeader() *raft.Raft {
 			}
 		}
 
-		if voteCount >= (INSTANCE_NUM/2)+1 {
+		if voteCount >= (runner.quorum/2)+1 {
 			// this is the real leader
 			return leaderR
 		} else {
 			return nil
 		}
 	}
+}
+
+func (runner *InstanceRunner) newTimePeriod() *TimePeriod {
+	tp := &TimePeriod{
+		startTime:       time.Now(),
+		duration:        PERIOD_DURATION,
+		instanceHealthy: map[int]*InstanceHealthy{},
+	}
+
+	maxBrokenNum := runner.quorum / 2
+	brokenNum := rand.Intn(maxBrokenNum + 1)
+	for i := 0; i < runner.quorum; i++ {
+		brokenProb := float64(brokenNum) / float64((runner.quorum - i))
+		if rand.Float64() < brokenProb {
+			// this instance should be broken
+			tp.instanceHealthy[i] = newBrokenInstanceHealthy()
+			brokenNum -= 1
+		} else {
+			// this instance should be healthy
+			tp.instanceHealthy[i] = newNormalInstanceHealthy()
+		}
+	}
+	return tp
 }

@@ -1,0 +1,12 @@
+{
+  "runners": [
+    {
+      "quorum": 3,
+      "num": 10
+    },
+    {
+      "quorum": 5,
+      "num": 10
+    }
+  ]
+}
