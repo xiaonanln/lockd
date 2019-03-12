@@ -130,7 +130,9 @@ func (ll *LogList) AppendEntries(prevTerm Term, prevIndex LogIndex, entries []*L
 			if replaceLog.Term == entry.Term {
 				// normal case
 			} else {
-				replaceLog.Term, replaceLog.Data = entry.Term, entry.Data
+				// better not modify Log in-place
+				overrideLog := *entry
+				ll.Logs[replaceIdx] = &overrideLog
 				ll.Logs = ll.Logs[0 : replaceIdx+1]
 			}
 		} else {
