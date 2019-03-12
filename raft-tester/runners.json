@@ -2,27 +2,27 @@
   "runners": [
     {
       "quorum": 2,
-      "num": 0
+      "num": 20
     },
     {
       "quorum": 3,
-      "num": 10
+      "num": 20
     },
     {
       "quorum": 4,
-      "num": 0
+      "num": 20
     },
     {
       "quorum": 5,
-      "num": 10
+      "num": 20
     },
     {
       "quorum": 6,
-      "num": 0
+      "num": 20
     }, 
     {
       "quorum": 7,
-      "num": 10
+      "num": 20
     }
   ]
 }
