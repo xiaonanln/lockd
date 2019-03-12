@@ -7,7 +7,6 @@ import (
 	"io"
 	"math/rand"
 	"strconv"
-	"sync"
 	"time"
 	"unsafe"
 
@@ -19,6 +18,7 @@ import (
 )
 
 type DemoRaftInstance struct {
+	runner   *InstanceRunner
 	ctx      context.Context
 	id       int
 	recvChan chan raft.RecvRPCMessage
@@ -26,42 +26,6 @@ type DemoRaftInstance struct {
 
 	healthy       xnsyncutil.AtomicPointer
 	sumAllNumbers int64
-}
-
-var (
-	instancesLock sync.RWMutex
-	instances     = map[int]*DemoRaftInstance{}
-)
-
-func NewDemoRaftInstance(ctx context.Context, id int) *DemoRaftInstance {
-	ins := &DemoRaftInstance{
-		ctx:      ctx,
-		id:       id,
-		recvChan: make(chan raft.RecvRPCMessage, 1000),
-	}
-	ins.Raft = raft.NewRaft(ctx, INSTANCE_NUM, ins, ins)
-	ins.healthy.Store(unsafe.Pointer(&InstanceHealthyPerfect)) // all instances area perfectly healthy when started
-
-	instancesLock.Lock()
-	instances[id] = ins
-	instancesLock.Unlock()
-	return ins
-}
-
-func getInstance(id int) *DemoRaftInstance {
-	instancesLock.RLock()
-	defer instancesLock.RUnlock()
-	return instances[id]
-}
-
-func getAllInstances() (inss map[int]*DemoRaftInstance) {
-	instancesLock.RLock()
-	defer instancesLock.RUnlock()
-	inss = map[int]*DemoRaftInstance{}
-	for id, ins := range instances {
-		inss[id] = ins
-	}
-	return
 }
 
 func (ins *DemoRaftInstance) String() string {
@@ -110,7 +74,7 @@ func (ins *DemoRaftInstance) Send(insID int, msg raft.RPCMessage) {
 		return
 	}
 
-	dstInstance := getInstance(insID)
+	dstInstance := ins.runner.getInstance(insID)
 	dstH := dstInstance.GetHealthy()
 	assert.Truef(assertLogger, dstInstance != ins, "%s Send to %d,%s, msg=%#v", ins, insID, dstInstance, msg)
 	if !dstH.CanRecv() {
@@ -125,7 +89,7 @@ func (ins *DemoRaftInstance) Send(insID int, msg raft.RPCMessage) {
 
 // Broadcast sends message to all other instances
 func (ins *DemoRaftInstance) Broadcast(msg raft.RPCMessage) {
-	allInstances := getAllInstances()
+	allInstances := ins.runner.getAllInstances()
 	for id, dst := range allInstances {
 		if dst != ins {
 			ins.Send(id, msg)
