@@ -800,7 +800,7 @@ func (r *Raft) broadcastAppendEntries() {
 			r.transport.Send(insID, msg)
 		} else {
 			// this follower is too far behind to append entries, we need install snapshot to it
-			assert.True(r.assertLogger, r.LogList.Snapshot != nil)
+			assert.Truef(r.assertLogger, r.LogList.Snapshot != nil, "dst=%d, ok=%v, prevLogTerm=%v, prefLogIndex=%v, nextLogIndex=%v,%#v raft=%s", insID, ok, prevLogTerm, prevLogIndex, nextLogIndex, r.nextIndex, r)
 			snapshot := r.LogList.Snapshot
 			msg := &InstallSnapshotMessage{
 				Term:     r.CurrentTerm,
