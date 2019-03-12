@@ -221,12 +221,12 @@ func (ll *LogList) SetSnapshot(snapshot *Snapshot) bool {
 type Raft struct {
 	sync.Mutex // for locking
 
-	transport   Transport
-	ss          StateMachine
-	ctx         context.Context
-	cancelFunc  context.CancelFunc
-	instanceNum int
-	mode        WorkMode
+	transport  Transport
+	ss         StateMachine
+	ctx        context.Context
+	cancelFunc context.CancelFunc
+	quorum     int
+	mode       WorkMode
 
 	// raft states
 	CurrentTerm Term
@@ -261,13 +261,13 @@ type Raft struct {
 	logInput     chan []LogData
 }
 
-func NewRaft(ctx context.Context, instanceNum int, transport Transport, ss StateMachine) *Raft {
-	if instanceNum <= 0 {
-		log.Fatalf("instanceNum should be larger than 0")
+func NewRaft(ctx context.Context, quorum int, transport Transport, ss StateMachine) *Raft {
+	if quorum <= 0 {
+		log.Fatalf("quorum should be larger than 0")
 	}
 
-	if transport.ID() >= instanceNum {
-		log.Fatalf("instance ID should be smaller than %d", instanceNum)
+	if transport.ID() >= quorum {
+		log.Fatalf("instance ID should be smaller than %d", quorum)
 	}
 
 	raftCtx, cancelFunc := context.WithCancel(ctx)
@@ -276,7 +276,7 @@ func NewRaft(ctx context.Context, instanceNum int, transport Transport, ss State
 		ss:                       ss,
 		ctx:                      raftCtx,
 		cancelFunc:               cancelFunc,
-		instanceNum:              instanceNum,
+		quorum:                   quorum,
 		mode:                     Follower,
 		resetElectionTimeoutTime: time.Now(),
 		// init raft states
@@ -425,7 +425,7 @@ func (r *Raft) handleRequestVoteACKMessage(msg *RequestVoteACKMessage) {
 
 	if msg.voteGranted {
 		r.voteGrantedCount += 1
-		if r.voteGrantedCount >= (r.instanceNum/2)+1 {
+		if r.voteGrantedCount >= (r.quorum/2)+1 {
 			// become leader
 			r.enterLeaderMode()
 		}
@@ -479,7 +479,7 @@ func (r *Raft) handleAppendEntriesACK(senderID int, msg *AppendEntriesACKMessage
 		// AppendEntries fail
 		// decrement nextIndex, but nextIndex should be at least 1
 		step := r.nextIndexSearchStep[senderID]
-		if r.nextIndex[senderID]-step > 0 {
+		if r.nextIndex[senderID] > step {
 			r.nextIndex[senderID] -= step
 		} else {
 			r.nextIndex[senderID] = 1
@@ -756,21 +756,21 @@ func (r *Raft) enterLeaderMode() {
 
 	log.Printf("%s change mode: %s ==> %s", r, r.mode, Leader)
 	r.mode = Leader
-	log.Printf("NEW LEADER ELECTED: %d, term=%v, granted=%d, quorum=%d !!!", r.ID(), r.CurrentTerm, r.voteGrantedCount, r.instanceNum)
+	log.Printf("NEW LEADER ELECTED: %d, term=%v, granted=%d, quorum=%d !!!", r.ID(), r.CurrentTerm, r.voteGrantedCount, r.quorum)
 	r.lastAppendEntriesRPCTime = time.Time{}
-	r.nextIndex = make([]LogIndex, r.instanceNum)
-	r.nextIndexSearchStep = make([]LogIndex, r.instanceNum)
+	r.nextIndex = make([]LogIndex, r.quorum)
+	r.nextIndexSearchStep = make([]LogIndex, r.quorum)
 	for i := range r.nextIndex {
 		r.nextIndex[i] = r.LogList.LastIndex() + 1
 		r.nextIndexSearchStep[i] = 1
 	}
 
-	r.matchIndex = make([]LogIndex, r.instanceNum)
+	r.matchIndex = make([]LogIndex, r.quorum)
 }
 
 func (r *Raft) broadcastAppendEntries() {
 	// TODO: use broadcast if all followers have same `nextIndex`
-	for insID := 0; insID < r.instanceNum; insID++ {
+	for insID := 0; insID < r.quorum; insID++ {
 		if insID == r.ID() {
 			continue
 		}
@@ -829,7 +829,7 @@ func (r *Raft) tryCommitLogs() {
 				commitCount += 1
 			}
 		}
-		if commitCount >= r.instanceNum/2+1 {
+		if commitCount >= r.quorum/2+1 {
 			// commited
 			r.CommitIndex = _log.Index
 			//log.Printf("%s COMMITS %d", r, r.CommitIndex)
