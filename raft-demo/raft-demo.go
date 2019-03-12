@@ -275,7 +275,7 @@ func findLeader() *raft.Raft {
 
 		// make sure this leader is voted by majority of members
 		voteCount := 0
-		for i := 1; i < len(leaders); i++ {
+		for i := 0; i < len(leaders); i++ {
 			r := raftInstances[leaders[i]].Raft
 			if r.CurrentTerm == leaderR.CurrentTerm && r.VotedFor == bestLeader {
 				voteCount += 1
