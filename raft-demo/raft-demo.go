@@ -188,7 +188,7 @@ func verifyCorrectness(instances []*DemoRaftInstance) {
 	}
 
 	if leader == nil {
-		log.Printf("leader not found")
+		log.Printf("leader not found: followers: %v", followers)
 	} else {
 		log.Printf("found leader: %v, followers: %v", leader, followers)
 	}
