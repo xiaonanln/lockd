@@ -112,7 +112,7 @@ func main() {
 
 		time.Sleep(time.Microsecond * 1)
 		verifyCounter += 1
-		if verifyCounter%10000 == 0 {
+		if verifyCounter%1000 == 0 {
 			verifyCorrectness(raftInstances)
 		}
 
