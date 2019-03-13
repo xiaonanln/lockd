@@ -152,7 +152,7 @@ func (runner *InstanceRunner) verifyCorrectness() {
 		// the current leader's CommitIndex is less than before (previous leader's CommitIndex)
 		// which is a normal case when new leader is elected
 		// In this case, the new leader has less CommitIndex, but it must contains logs to previous leader's CommitIndex
-		assert.GreaterOrEqual(assertLogger, leader.LogList.LastIndex(), runner.lastLeaderCommitIndex)
+		assert.GreaterOrEqual(assertLogger, leader.LogList.LastIndex(), runner.lastLeaderCommitIndex, "leader=%s, lastLeaderCommitIndex=%v, followers=%v", leader, runner.lastLeaderCommitIndex, followers)
 	}
 	runner.lastLeaderCommitIndex = leaderCommitIndex
 
@@ -247,7 +247,7 @@ func (runner *InstanceRunner) newTimePeriod() *TimePeriod {
 		instanceHealthy: map[int]*InstanceHealthy{},
 	}
 
-	maxBrokenNum := runner.quorum / 2
+	maxBrokenNum := (runner.quorum - 1) / 2
 	brokenNum := rand.Intn(maxBrokenNum + 1)
 	for i := 0; i < runner.quorum; i++ {
 		brokenProb := float64(brokenNum) / float64((runner.quorum - i))
