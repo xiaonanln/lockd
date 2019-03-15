@@ -247,7 +247,7 @@ func (runner *InstanceRunner) newTimePeriod() *TimePeriod {
 		instanceHealthy: map[int]*InstanceHealthy{},
 	}
 
-	maxBrokenNum := runner.quorum / 2
+	maxBrokenNum := (runner.quorum - 1) / 2
 	brokenNum := rand.Intn(maxBrokenNum + 1)
 	for i := 0; i < runner.quorum; i++ {
 		brokenProb := float64(brokenNum) / float64((runner.quorum - i))
