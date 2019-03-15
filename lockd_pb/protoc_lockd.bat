@@ -1,0 +1,1 @@
+protoc -I . lockd.proto --go_out=plugins=grpc:.

@@ -8,14 +8,14 @@ So, 3 or 5 locking service instances consist a cluster to offer high availabilit
 
 ## Implementing Raft Features
 
-Yes, I am using this project to learn Raft.
+Most of Raft features will be implemented. 
 
 - [ ] Basic Raft Algorithm
     - [x] Leader election
     - [x] Log replication
     - [x] Safety
     - [ ] Persisted state (won't have)
-    - [ ] Server restarts
+    - [x] Server restarts
     - [ ] Leader transfer extension
     
 - [ ] Cluster membership changes
@@ -29,6 +29,7 @@ Yes, I am using this project to learn Raft.
     - [ ] Implementing linearizable semantics
     - [ ] Processing read-only queries more efficiently
 
-## Raft demo
-The raft-demo is used to test the correctness in simulation. 
-Raft-demo sends test data to the raft algorithm 
+## Raft-tester
+The raft-tester is used to test the correctness in simulation. 
+Raft-tester runs multiple Raft Clusters to test the correctness of Raft algorhtm
+with different values of quorum. 
