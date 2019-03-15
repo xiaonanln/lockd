@@ -82,8 +82,9 @@ func (ins *DemoRaftInstance) Send(insID int, msg raft.RPCMessage) {
 	}
 
 	totalDelay := time.Millisecond + h.SendDelay + dstH.RecvDelay
+	msgCopy := msg.Copy() // must copy message in raft goroutine
 	time.AfterFunc(totalDelay, func() {
-		dstInstance.recvChan <- raft.RecvRPCMessage{ins.ID(), msg.Copy()}
+		dstInstance.recvChan <- raft.RecvRPCMessage{ins.ID(), msgCopy}
 	})
 }
 
