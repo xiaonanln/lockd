@@ -21,7 +21,7 @@ Most of Raft features will be implemented.
 - [ ] Cluster membership changes
 
 - [ ] Log compaction
-    - [x] Memory-Based Snapshots
+    - [x] Memory-Based Snapshots (partly)
 
 - [ ] Client interaction
     - [ ] Finding the cluster

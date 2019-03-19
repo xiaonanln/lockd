@@ -241,13 +241,28 @@ func (runner *InstanceRunner) findLeader() *raft.Raft {
 }
 
 func (runner *InstanceRunner) newTimePeriod() *TimePeriod {
+	oldTimePeriod := runner.currentPeriod
+
 	tp := &TimePeriod{
 		startTime:       time.Now(),
 		duration:        PERIOD_DURATION,
 		instanceHealthy: map[int]*InstanceHealthy{},
 	}
 
+	// calculate how many instances were crashed in the previous period
+	oldCrashNum := 0
+	if oldTimePeriod != nil {
+		for _, h := range oldTimePeriod.instanceHealthy {
+			if h.Crash || h.NetworkDown {
+				oldCrashNum += 1
+			}
+		}
+	}
+
 	maxBrokenNum := (runner.quorum - 1) / 2
+	assert.LessOrEqual(assertLogger, oldCrashNum, maxBrokenNum)
+	maxBrokenNum -= oldCrashNum
+
 	brokenNum := rand.Intn(maxBrokenNum + 1)
 	for i := 0; i < runner.quorum; i++ {
 		brokenProb := float64(brokenNum) / float64((runner.quorum - i))
