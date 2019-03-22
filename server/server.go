@@ -25,6 +25,8 @@ import (
 	"log"
 	"net"
 
+	"github.com/xiaonanln/lockd/raft"
+
 	"github.com/xiaonanln/lockd/pb"
 
 	"google.golang.org/grpc"
@@ -35,16 +37,29 @@ const ()
 
 // server is used to implement helloworld.GreeterServer.
 type Server struct {
-	grpcServer *grpc.Server
+	ctx         context.Context
+	cancelCtx   context.CancelFunc
+	grpcServer  *grpc.Server
+	raft        *raft.Raft
+	transport   *TransportUDP
+	lockMachine *LockMatchine
 }
 
 func (s *Server) Lock(ctx context.Context, request *pb.LockRequest) (reply *pb.LockReply, err error) {
 	return
 }
 
-func NewServer() *Server {
+func NewServer(ctx context.Context, servers []string) *Server {
 	grpcServer := grpc.NewServer()
-	s := &Server{grpcServer: grpcServer}
+	serverContext, serverCancel := context.WithCancel(ctx)
+	s := &Server{
+		ctx:         serverContext,
+		cancelCtx:   serverCancel,
+		grpcServer:  grpcServer,
+		lockMachine: newLockMachine(),
+		transport:   newTransportUDP(servers),
+	}
+	s.raft = raft.NewRaft(serverContext, len(servers), s.transport, s.lockMachine)
 	pb.RegisterLockdServer(grpcServer, s)
 	// Register reflection service on gRPC server.
 	reflection.Register(grpcServer)
