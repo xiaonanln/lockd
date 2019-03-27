@@ -16,8 +16,9 @@ import (
 type InstanceRunner struct {
 	ctx                   context.Context
 	quorum                int
+	peers                 []raft.TransportID
 	instancesLock         sync.RWMutex
-	instances             map[int]*DemoRaftInstance
+	instances             map[raft.TransportID]*DemoRaftInstance
 	lastLeaderCommitIndex raft.LogIndex
 	currentPeriod         *TimePeriod
 }
@@ -26,27 +27,34 @@ func newInstanceRunner(ctx context.Context, quorum int) *InstanceRunner {
 	r := &InstanceRunner{
 		ctx:       ctx,
 		quorum:    quorum,
-		instances: map[int]*DemoRaftInstance{},
+		instances: map[raft.TransportID]*DemoRaftInstance{},
 
 		lastLeaderCommitIndex: raft.InvalidLogIndex,
 	}
 
 	for i := 0; i < quorum; i++ {
-		ins := r.newDemoRaftInstance(i)
-		r.instances[i] = ins
+		id := raft.TransportID(strconv.Itoa(i))
+		r.peers = append(r.peers, id)
+		ins := r.newDemoRaftInstance(id, quorum)
+		r.instances[raft.TransportID(strconv.Itoa(i))] = ins
 	}
 
 	return r
 }
 
-func (runner *InstanceRunner) newDemoRaftInstance(id int) *DemoRaftInstance {
+func (runner *InstanceRunner) newDemoRaftInstance(id raft.TransportID, quorum int) *DemoRaftInstance {
 	ins := &DemoRaftInstance{
 		runner:   runner,
 		ctx:      runner.ctx,
 		id:       id,
+		quorum:   quorum,
 		recvChan: make(chan raft.RecvRPCMessage, 1000),
 	}
-	ins.Raft = raft.NewRaft(ins.ctx, ins.runner.quorum, ins, ins)
+	peers := []raft.TransportID{}
+	for i := 0; i < ins.quorum; i++ {
+		peers = append(peers, raft.TransportID(strconv.Itoa(i)))
+	}
+	ins.Raft = raft.NewRaft(ins.ctx, ins.runner.quorum, ins, ins, peers)
 	ins.healthy.Store(unsafe.Pointer(&InstanceHealthyPerfect)) // all instances area perfectly healthy when started
 
 	runner.instancesLock.Lock()
@@ -55,16 +63,16 @@ func (runner *InstanceRunner) newDemoRaftInstance(id int) *DemoRaftInstance {
 	return ins
 }
 
-func (runner *InstanceRunner) getInstance(id int) *DemoRaftInstance {
+func (runner *InstanceRunner) getInstance(id raft.TransportID) *DemoRaftInstance {
 	runner.instancesLock.RLock()
 	defer runner.instancesLock.RUnlock()
 	return runner.instances[id]
 }
 
-func (runner *InstanceRunner) getAllInstances() (inss map[int]*DemoRaftInstance) {
+func (runner *InstanceRunner) getAllInstances() (inss map[raft.TransportID]*DemoRaftInstance) {
 	runner.instancesLock.RLock()
 	defer runner.instancesLock.RUnlock()
-	inss = map[int]*DemoRaftInstance{}
+	inss = map[raft.TransportID]*DemoRaftInstance{}
 	for id, ins := range runner.instances {
 		inss[id] = ins
 	}
@@ -78,10 +86,10 @@ func (runner *InstanceRunner) Run() {
 	runner.currentPeriod = runner.newTimePeriod()
 	runner.applyTimePeriod()
 	for {
-		randInsIdx := rand.Intn(runner.quorum)
+		randInsID := raft.TransportID(strconv.Itoa(rand.Intn(runner.quorum)))
 		inputCounter = inputCounter + 1
 		inputData := strconv.Itoa(inputCounter)
-		r := runner.instances[randInsIdx].Raft
+		r := runner.instances[randInsID].Raft
 		r.Lock()
 		if r.Mode() == raft.Leader {
 			r.Input([]byte(inputData))
@@ -102,9 +110,9 @@ func (runner *InstanceRunner) Run() {
 }
 
 func (runner *InstanceRunner) applyTimePeriod() {
-	for i := 0; i < runner.quorum; i++ {
-		ins := runner.instances[i]
-		ins.SetHealthy(runner.currentPeriod.instanceHealthy[i])
+	for _, peerID := range runner.peers {
+		ins := runner.instances[peerID]
+		ins.SetHealthy(runner.currentPeriod.instanceHealthy[peerID])
 	}
 }
 
@@ -112,14 +120,14 @@ func (runner *InstanceRunner) verifyCorrectness() {
 	// verify the correctness of Raft algorithm
 	// lock all Raft instances before
 	lock := func() {
-		for i := 0; i < runner.quorum; i++ {
-			runner.instances[i].Raft.Lock()
+		for _, peerID := range runner.peers {
+			runner.instances[peerID].Raft.Lock()
 		}
 	}
 
 	unlock := func() {
-		for i := 0; i < runner.quorum; i++ {
-			runner.instances[i].Raft.Unlock()
+		for _, peerID := range runner.peers {
+			runner.instances[peerID].Raft.Unlock()
 		}
 	}
 
@@ -129,7 +137,8 @@ func (runner *InstanceRunner) verifyCorrectness() {
 	leader := runner.findLeader()
 	followers := []*raft.Raft{}
 	for i := 0; i < runner.quorum; i++ {
-		r := runner.instances[i].Raft
+		id := raft.TransportID(strconv.Itoa(i))
+		r := runner.instances[id].Raft
 		r.VerifyCorrectness()
 		if r != leader {
 			followers = append(followers, r)
@@ -159,8 +168,8 @@ func (runner *InstanceRunner) verifyCorrectness() {
 	isAllAppliedLogIndexSame := true    // determine if all rafts has same LastAppliedIndex
 	minLogIndex := raft.InvalidLogIndex // to find the first log logIndex that <= leader.CommitIndex and exists on all raft instances
 	// other raft instances should not have larger commit logIndex
-	for i := 0; i < runner.quorum; i++ {
-		r := runner.instances[i].Raft
+	for _, id := range runner.peers {
+		r := runner.instances[id].Raft
 		//assert.LessOrEqual(demoLogger, r.CommitIndex, leaderCommitIndex) // not necessary so
 		if minLogIndex < r.LogList.SnapshotLastIndex()+1 {
 			minLogIndex = r.LogList.SnapshotLastIndex() + 1
@@ -177,8 +186,8 @@ func (runner *InstanceRunner) verifyCorrectness() {
 		logTerm := leaderLog.Term
 		logData := leaderLog.Data
 
-		for i := 0; i < runner.quorum; i++ {
-			r := runner.instances[i].Raft
+		for _, id := range runner.peers {
+			r := runner.instances[id].Raft
 			if r != leader && logIndex <= r.CommitIndex {
 				followerLog := r.LogList.GetLog(logIndex)
 				assert.Equal(assertLogger, logIndex, followerLog.Index)
@@ -191,7 +200,7 @@ func (runner *InstanceRunner) verifyCorrectness() {
 	// make sure all state machines are consistent
 	if isAllAppliedLogIndexSame {
 		for i := 0; i < runner.quorum-1; i++ {
-			assert.True(assertLogger, runner.instances[i].StateMachineEquals(runner.instances[i+1]))
+			assert.True(assertLogger, runner.instances[raft.TransportID(strconv.Itoa(i))].StateMachineEquals(runner.instances[raft.TransportID(strconv.Itoa(i+1))]))
 		}
 		demoLogger.Infof("CONGRATULATIONS! ALL REPLICATED STATE MACHINES ARE CONSISTENT.")
 	}
@@ -200,10 +209,10 @@ func (runner *InstanceRunner) verifyCorrectness() {
 }
 
 func (runner *InstanceRunner) findLeader() *raft.Raft {
-	leaders := []int{}
-	for i := 0; i < runner.quorum; i++ {
-		if runner.instances[i].Raft.Mode() == raft.Leader {
-			leaders = append(leaders, i)
+	leaders := []raft.TransportID{}
+	for _, id := range runner.peers {
+		if runner.instances[id].Raft.Mode() == raft.Leader {
+			leaders = append(leaders, id)
 		}
 	}
 
@@ -246,7 +255,7 @@ func (runner *InstanceRunner) newTimePeriod() *TimePeriod {
 	tp := &TimePeriod{
 		startTime:       time.Now(),
 		duration:        PERIOD_DURATION,
-		instanceHealthy: map[int]*InstanceHealthy{},
+		instanceHealthy: map[raft.TransportID]*InstanceHealthy{},
 	}
 
 	// calculate how many instances were crashed in the previous period
@@ -264,15 +273,15 @@ func (runner *InstanceRunner) newTimePeriod() *TimePeriod {
 	maxBrokenNum -= oldCrashNum
 
 	brokenNum := rand.Intn(maxBrokenNum + 1)
-	for i := 0; i < runner.quorum; i++ {
+	for i, id := range runner.peers {
 		brokenProb := float64(brokenNum) / float64((runner.quorum - i))
 		if rand.Float64() < brokenProb {
 			// this instance should be broken
-			tp.instanceHealthy[i] = newBrokenInstanceHealthy()
+			tp.instanceHealthy[id] = newBrokenInstanceHealthy()
 			brokenNum -= 1
 		} else {
 			// this instance should be healthy
-			tp.instanceHealthy[i] = newNormalInstanceHealthy()
+			tp.instanceHealthy[id] = newNormalInstanceHealthy()
 		}
 	}
 	return tp

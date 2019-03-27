@@ -29,7 +29,7 @@ const (
 )
 
 type RecvRPCMessage struct {
-	SenderID int
+	SenderID TransportID
 	Message  RPCMessage
 }
 
@@ -47,11 +47,15 @@ func (d LogData) String() string {
 }
 
 type Transport interface {
-	ID() int
+	ID() TransportID
 	Recv() <-chan RecvRPCMessage
-	Send(instanceID int, msg RPCMessage)
+	Send(dstID TransportID, msg RPCMessage)
 	Broadcast(msg RPCMessage)
 }
+
+type TransportID string
+
+const InvalidTransportID TransportID = ""
 
 type StateMachine interface {
 	ApplyLog(log []byte)

@@ -2,6 +2,8 @@ package main
 
 import (
 	"time"
+
+	"github.com/xiaonanln/lockd/raft"
 )
 
 const (
@@ -11,11 +13,11 @@ const (
 type TimePeriod struct {
 	startTime       time.Time
 	duration        time.Duration
-	instanceHealthy map[int]*InstanceHealthy
+	instanceHealthy map[raft.TransportID]*InstanceHealthy
 }
 
-func (tp *TimePeriod) isBroken(idx int) bool {
-	_, ok := tp.instanceHealthy[idx]
+func (tp *TimePeriod) isBroken(id raft.TransportID) bool {
+	_, ok := tp.instanceHealthy[id]
 	return ok
 }
 

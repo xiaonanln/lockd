@@ -20,7 +20,8 @@ import (
 type DemoRaftInstance struct {
 	runner   *InstanceRunner
 	ctx      context.Context
-	id       int
+	id       raft.TransportID
+	quorum   int
 	recvChan chan raft.RecvRPCMessage
 	Raft     *raft.Raft
 
@@ -29,16 +30,20 @@ type DemoRaftInstance struct {
 }
 
 func (ins *DemoRaftInstance) String() string {
-	return fmt.Sprintf("DemoRaftInstance<%d>", ins.id)
+	return fmt.Sprintf("DemoRaftInstance<%s>", ins.id)
 }
-func (ins *DemoRaftInstance) ID() int {
+func (ins *DemoRaftInstance) ID() raft.TransportID {
 	return ins.id
 }
 
 func (ins *DemoRaftInstance) Recover() {
 	ins.Raft.Shutdown() // duplicate Shutdown, but should be fine
 	ins.sumAllNumbers = 0
-	ins.Raft = raft.NewRaft(ins.ctx, ins.runner.quorum, ins, ins)
+	peers := []raft.TransportID{}
+	for i := 0; i < ins.quorum; i++ {
+		peers = append(peers, raft.TransportID(strconv.Itoa(i)))
+	}
+	ins.Raft = raft.NewRaft(ins.ctx, ins.runner.quorum, ins, ins, peers)
 }
 
 func (ins *DemoRaftInstance) Crash() {
@@ -62,7 +67,7 @@ func (ins *DemoRaftInstance) Recv() <-chan raft.RecvRPCMessage {
 	return ins.recvChan
 }
 
-func (ins *DemoRaftInstance) Send(insID int, msg raft.RPCMessage) {
+func (ins *DemoRaftInstance) Send(insID raft.TransportID, msg raft.RPCMessage) {
 	h := ins.GetHealthy()
 
 	if !h.CanSend() {

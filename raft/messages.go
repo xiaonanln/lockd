@@ -9,7 +9,7 @@ type AppendEntriesMessage struct {
 	//GetTerm leader’s GetTerm
 	Term Term
 	//leaderID so follower can redirect clients
-	leaderID int
+	leaderID TransportID
 	//prevLogIndex Index of LogList entry immediately preceding new ones
 	prevLogIndex LogIndex
 	//prevLogTerm GetTerm of prevLogIndex entry
@@ -51,7 +51,7 @@ type RequestVoteMessage struct {
 	// GetTerm candidate’s GetTerm
 	Term Term
 	// candidateId candidate requesting vote
-	candidateId int
+	candidateId TransportID
 	// lastLogIndex Index of candidate’s last LogList entry
 	lastLogIndex LogIndex
 	//lastLogTerm GetTerm of candidate’s last LogList entry
@@ -82,8 +82,8 @@ func (m *RequestVoteACKMessage) GetTerm() Term {
 
 //Invoked by leader to send chunks of a snapshot to a follower
 type InstallSnapshotMessage struct {
-	Term     Term // leader's term
-	leaderID int  // so follower can redirect clients
+	Term     Term        // leader's term
+	leaderID TransportID // so follower can redirect clients
 	Snapshot *Snapshot
 	//lastIndex LogIndex // the snapshot replaces all entries up through and including this index
 	//lastTerm  Term     // term of lastIndex

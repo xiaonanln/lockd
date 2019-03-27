@@ -221,7 +221,9 @@ func (ll *LogList) SetSnapshot(snapshot *Snapshot) bool {
 type Raft struct {
 	sync.Mutex // for locking
 
-	transport  Transport
+	transport Transport
+	peers     []TransportID
+
 	ss         StateMachine
 	ctx        context.Context
 	cancelFunc context.CancelFunc
@@ -230,7 +232,7 @@ type Raft struct {
 
 	// raft states
 	CurrentTerm Term
-	VotedFor    int
+	VotedFor    TransportID
 	LogList     LogList
 	// Index of highest LogList entry known to be committed (initialized to 0, increases monotonically)
 	CommitIndex LogIndex
@@ -251,24 +253,24 @@ type Raft struct {
 	// leader mode fields
 	lastAppendEntriesRPCTime time.Time
 	// for each server, Index of the next LogList entry to send to that server (initialized to leader last LogList Index + 1)
-	nextIndex           []LogIndex
-	nextIndexSearchStep []LogIndex
+	nextIndex           map[TransportID]LogIndex
+	nextIndexSearchStep map[TransportID]LogIndex
 	// for each server, Index of highest LogList entry known to be replicated on server (initialized to 0, increases monotonically)
-	matchIndex []LogIndex
+	matchIndex map[TransportID]LogIndex
 
 	Logger       Logger
 	assertLogger assert.TestingT
 	logInput     chan []LogData
 }
 
-func NewRaft(ctx context.Context, quorum int, transport Transport, ss StateMachine) *Raft {
+func NewRaft(ctx context.Context, quorum int, transport Transport, ss StateMachine, peers []TransportID) *Raft {
 	if quorum <= 0 {
 		log.Fatalf("quorum should be larger than 0")
 	}
 
-	if transport.ID() >= quorum {
-		log.Fatalf("instance ID should be smaller than %d", quorum)
-	}
+	//if transport.Addr() >= quorum {
+	//	log.Fatalf("instance ID should be smaller than %d", quorum)
+	//}
 
 	raftCtx, cancelFunc := context.WithCancel(ctx)
 	raft := &Raft{
@@ -277,17 +279,20 @@ func NewRaft(ctx context.Context, quorum int, transport Transport, ss StateMachi
 		ctx:                      raftCtx,
 		cancelFunc:               cancelFunc,
 		quorum:                   quorum,
+		peers:                    peers,
 		mode:                     Follower,
 		resetElectionTimeoutTime: time.Now(),
 		// init raft states
 		CurrentTerm:      InvalidTerm,
-		VotedFor:         -1,
+		VotedFor:         InvalidTransportID,
 		LogList:          LogList{},
 		CommitIndex:      InvalidLogIndex,
 		LastAppliedIndex: 0,
 		Logger:           defaultSugaredLogger,
 		assertLogger:     MakeAssertLogger(defaultSugaredLogger),
 	}
+
+	assert.Equal(raft.assertLogger, quorum, len(peers))
 
 	go raft.routine()
 	return raft
@@ -297,12 +302,12 @@ func (r *Raft) Shutdown() {
 	r.cancelFunc()
 }
 
-func (r *Raft) ID() int {
+func (r *Raft) ID() TransportID {
 	return r.transport.ID()
 }
 
 func (r *Raft) String() string {
-	return fmt.Sprintf("Raft<%d|%v|%d|%s|C%d|A%d>", r.transport.ID(), r.mode, r.CurrentTerm, &r.LogList, r.CommitIndex, r.LastAppliedIndex)
+	return fmt.Sprintf("Raft<%s|%v|%d|%s|C%d|A%d>", r.ID(), r.mode, r.CurrentTerm, &r.LogList, r.CommitIndex, r.LastAppliedIndex)
 }
 
 func (r *Raft) Mode() WorkMode {
@@ -345,8 +350,8 @@ forloop:
 
 		case recvMsg := <-r.transport.Recv():
 			//LogList.Printf("%s received msg: %+v", r, msg)
-			assert.NotEqual(r.assertLogger, r.ID(), recvMsg.SenderID)
 			r.Lock()
+			assert.NotEqual(r.assertLogger, r.ID(), recvMsg.SenderID)
 			r.handleMsg(recvMsg.SenderID, recvMsg.Message)
 			r.Unlock()
 		case <-r.ctx.Done():
@@ -358,7 +363,7 @@ forloop:
 	}
 }
 
-func (r *Raft) handleMsg(senderID int, _msg RPCMessage) {
+func (r *Raft) handleMsg(senderID TransportID, _msg RPCMessage) {
 	//All Servers:
 	//?If RPC request or response contains Term T > CurrentTerm:
 	//set CurrentTerm = T, convert to follower (?.1)
@@ -410,7 +415,7 @@ func (r *Raft) _handleRequestVote(msg *RequestVoteMessage) bool {
 		return false
 	}
 
-	grantVote := (r.VotedFor == -1 || r.VotedFor == msg.candidateId) && r.isLogUpToDate(msg.lastLogTerm, msg.lastLogIndex)
+	grantVote := (r.VotedFor == InvalidTransportID || r.VotedFor == msg.candidateId) && r.isLogUpToDate(msg.lastLogTerm, msg.lastLogIndex)
 	if grantVote {
 		r.VotedFor = msg.candidateId
 	}
@@ -432,7 +437,7 @@ func (r *Raft) handleRequestVoteACKMessage(msg *RequestVoteACKMessage) {
 	}
 }
 
-func (r *Raft) handleInstallSnapshotACKMessage(senderID int, msg *InstallSnapshotACKMessage) {
+func (r *Raft) handleInstallSnapshotACKMessage(senderID TransportID, msg *InstallSnapshotACKMessage) {
 	// nothing todo here
 	if r.mode != Leader {
 		return
@@ -453,7 +458,7 @@ func (r *Raft) handleInstallSnapshotACKMessage(senderID int, msg *InstallSnapsho
 	}
 }
 
-func (r *Raft) handleAppendEntriesACK(senderID int, msg *AppendEntriesACKMessage) {
+func (r *Raft) handleAppendEntriesACK(senderID TransportID, msg *AppendEntriesACKMessage) {
 	if r.mode != Leader {
 		// not leader anymore..
 		return
@@ -735,7 +740,7 @@ func (r *Raft) newTerm(term Term) {
 		log.Fatalf("current Term is %d, can not enter follower mode with Term %d", r.CurrentTerm, term)
 	}
 	r.CurrentTerm = term
-	r.VotedFor = -1
+	r.VotedFor = InvalidTransportID
 	r.voteGrantedCount = 0
 }
 
@@ -756,21 +761,24 @@ func (r *Raft) enterLeaderMode() {
 
 	log.Printf("%s change mode: %s ==> %s", r, r.mode, Leader)
 	r.mode = Leader
-	log.Printf("NEW LEADER ELECTED: %d, term=%v, granted=%d, quorum=%d !!!", r.ID(), r.CurrentTerm, r.voteGrantedCount, r.quorum)
+	log.Printf("NEW LEADER ELECTED: %v, term=%v, granted=%d, quorum=%d !!!", r.ID(), r.CurrentTerm, r.voteGrantedCount, r.quorum)
 	r.lastAppendEntriesRPCTime = time.Time{}
-	r.nextIndex = make([]LogIndex, r.quorum)
-	r.nextIndexSearchStep = make([]LogIndex, r.quorum)
-	for i := range r.nextIndex {
-		r.nextIndex[i] = r.LogList.LastIndex() + 1
-		r.nextIndexSearchStep[i] = 1
+
+	r.nextIndex = make(map[TransportID]LogIndex, r.quorum)
+	r.nextIndexSearchStep = make(map[TransportID]LogIndex, r.quorum)
+	r.matchIndex = make(map[TransportID]LogIndex, r.quorum)
+
+	for _, peerID := range r.peers {
+		r.nextIndex[peerID] = r.LogList.LastIndex() + 1
+		r.nextIndexSearchStep[peerID] = 1
+		r.matchIndex[peerID] = InvalidLogIndex
 	}
 
-	r.matchIndex = make([]LogIndex, r.quorum)
 }
 
 func (r *Raft) broadcastAppendEntries() {
 	// TODO: use broadcast if all followers have same `nextIndex`
-	for insID := 0; insID < r.quorum; insID++ {
+	for _, insID := range r.peers {
 		if insID == r.ID() {
 			continue
 		}

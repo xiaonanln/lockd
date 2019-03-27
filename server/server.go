@@ -38,6 +38,7 @@ const ()
 // server is used to implement helloworld.GreeterServer.
 type Server struct {
 	ctx         context.Context
+	quorum      int
 	cancelCtx   context.CancelFunc
 	grpcServer  *grpc.Server
 	raft        *raft.Raft
@@ -49,17 +50,20 @@ func (s *Server) Lock(ctx context.Context, request *pb.LockRequest) (reply *pb.L
 	return
 }
 
-func NewServer(ctx context.Context, servers []string) *Server {
+func NewServer(ctx context.Context, advertiseAddr string, peers []string) *Server {
 	grpcServer := grpc.NewServer()
 	serverContext, serverCancel := context.WithCancel(ctx)
+	quorum := len(peers) + 1
+
 	s := &Server{
 		ctx:         serverContext,
 		cancelCtx:   serverCancel,
+		quorum:      quorum,
 		grpcServer:  grpcServer,
 		lockMachine: newLockMachine(),
-		transport:   newTransportUDP(servers),
+		transport:   newTransportUDP(peers),
 	}
-	s.raft = raft.NewRaft(serverContext, len(servers), s.transport, s.lockMachine)
+	s.raft = raft.NewRaft(serverContext, quorum, s.transport, s.lockMachine, []raft.TransportID{})
 	pb.RegisterLockdServer(grpcServer, s)
 	// Register reflection service on gRPC server.
 	reflection.Register(grpcServer)
